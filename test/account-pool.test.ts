@@ -98,3 +98,74 @@ test("acquireAccount throws when no active accounts", async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("removeAccount drops the record entirely", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pool-remove-"));
+  const previous = process.env.DATA_DIR;
+  process.env.DATA_DIR = tempDir;
+
+  try {
+    const { AccountPool } = await import(`../src/account-pool.js?case=${Date.now()}`);
+    const pool = new AccountPool(() => {});
+
+    await pool.addPreparedSession(makeSession("r1", tempDir) as never);
+    const before = await pool.listAccounts();
+    assert.equal(before.length, 1);
+
+    await pool.removeAccount(before[0]!.accountId);
+    const after = await pool.listAccounts();
+    assert.equal(after.length, 0);
+  } finally {
+    if (previous === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = previous;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("reactivateAccount clears cooldown and deleted status", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pool-react-"));
+  const previous = process.env.DATA_DIR;
+  process.env.DATA_DIR = tempDir;
+
+  try {
+    const { AccountPool } = await import(`../src/account-pool.js?case=${Date.now()}`);
+    const pool = new AccountPool(() => {});
+
+    await pool.addPreparedSession(makeSession("ra", tempDir) as never);
+    const account = await pool.acquireAccount();
+    await pool.markFailure(account.accountId, new Error("x"));
+    await pool.markFailure(account.accountId, new Error("y"));
+    const accounts1 = await pool.listAccounts();
+    assert.equal(accounts1[0]!.status, "deleted");
+
+    const reactivated = await pool.reactivateAccount(account.accountId);
+    assert.equal(reactivated?.status, "active");
+    assert.equal(reactivated?.strikeCount, 0);
+  } finally {
+    if (previous === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = previous;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("markImmediateCooldown skips strike accumulation", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pool-imm-"));
+  const previous = process.env.DATA_DIR;
+  process.env.DATA_DIR = tempDir;
+
+  try {
+    const { AccountPool } = await import(`../src/account-pool.js?case=${Date.now()}`);
+    const pool = new AccountPool(() => {});
+
+    await pool.addPreparedSession(makeSession("im", tempDir) as never);
+    const account = await pool.acquireAccount();
+
+    const cooled = await pool.markImmediateCooldown(account.accountId, new Error("429"), 1);
+    assert.equal(cooled?.status, "cooldown");
+    assert.equal(cooled?.strikeCount, 0);
+  } finally {
+    if (previous === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = previous;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

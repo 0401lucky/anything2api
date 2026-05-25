@@ -113,6 +113,49 @@ export class AccountPool {
     });
   }
 
+  public async removeAccount(accountId: string): Promise<void> {
+    await this.runExclusive(async () => {
+      const state = await this.loadState();
+      state.accounts = state.accounts.filter((account) => account.accountId !== accountId);
+      state.updatedAt = formatLocalTimestamp(new Date());
+      await this.saveState(state);
+    });
+  }
+
+  public async reactivateAccount(accountId: string): Promise<PoolAccountRecord | null> {
+    return this.runExclusive(async () => {
+      const state = await this.loadState();
+      const account = state.accounts.find((item) => item.accountId === accountId);
+      if (!account) return null;
+      account.status = "active";
+      account.strikeCount = 0;
+      account.cooldownUntil = null;
+      account.lastError = null;
+      state.updatedAt = formatLocalTimestamp(new Date());
+      await this.saveState(state);
+      return account;
+    });
+  }
+
+  public async markImmediateCooldown(
+    accountId: string,
+    error: unknown,
+    cooldownHours: number = ACCOUNT_COOLDOWN_HOURS,
+  ): Promise<PoolAccountRecord | null> {
+    return this.runExclusive(async () => {
+      const state = await this.loadState();
+      const account = state.accounts.find((item) => item.accountId === accountId);
+      if (!account) return null;
+      account.lastError = formatError(error);
+      account.lastUsedAt = formatLocalTimestamp(new Date());
+      account.status = "cooldown";
+      account.cooldownUntil = formatLocalTimestamp(addHours(new Date(), cooldownHours));
+      state.updatedAt = formatLocalTimestamp(new Date());
+      await this.saveState(state);
+      return account;
+    });
+  }
+
   public async listAccounts(): Promise<PoolAccountRecord[]> {
     const state = await this.loadState();
     this.reactivateExpiredCooldowns(state);
