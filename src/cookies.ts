@@ -14,8 +14,8 @@ export function normalizeImportedCookies(input: unknown): StoredCookie[] {
   const rawCookies = extractCookieList(parsed);
   const cookies = rawCookies.map(normalizeCookie).filter((cookie): cookie is StoredCookie => !!cookie);
 
-  if (!cookies.some((cookie) => cookie.name === "lS_authToken" && cookie.value)) {
-    throw new Error("Cookie 中未找到 lS_authToken，请确认已在本机浏览器登录 anything.com 后再导出。");
+  if (!cookies.some(isLikelyAuthCookie)) {
+    throw new Error("Cookie 中未找到 lS_authToken、refresh_token 或 authjs session，请确认已在本机浏览器登录 anything.com 后再导出。");
   }
 
   return dedupeCookies(cookies);
@@ -111,6 +111,22 @@ function dedupeCookies(cookies: StoredCookie[]): StoredCookie[] {
     byKey.set(`${cookie.domain ?? ""}\n${cookie.path ?? ""}\n${cookie.name}`, cookie);
   }
   return [...byKey.values()];
+}
+
+function isLikelyAuthCookie(cookie: StoredCookie): boolean {
+  if (!cookie.value) {
+    return false;
+  }
+
+  const lowerName = cookie.name.toLowerCase();
+  return (
+    cookie.name === "lS_authToken" ||
+    lowerName === "refresh_token" ||
+    lowerName.includes("authjs.session-token") ||
+    lowerName.includes("session-token") ||
+    lowerName.includes("auth-token") ||
+    lowerName.includes("auth_token")
+  );
 }
 
 function asString(value: unknown): string {

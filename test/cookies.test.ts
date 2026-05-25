@@ -25,6 +25,12 @@ test("normalizeImportedCookies accepts cookie header text", () => {
   assert.equal(buildCookieHeader(cookies), "foo=bar; lS_authToken=token");
 });
 
-test("normalizeImportedCookies requires lS_authToken", () => {
-  assert.throws(() => normalizeImportedCookies("foo=bar"), /lS_authToken/);
+test("normalizeImportedCookies accepts refresh_token", () => {
+  const cookies = normalizeImportedCookies("foo=bar; refresh_token=token");
+  assert.equal(cookies.length, 2);
+  assert.equal(buildCookieHeader(cookies), "foo=bar; refresh_token=token");
+});
+
+test("normalizeImportedCookies requires a likely auth cookie", () => {
+  assert.throws(() => normalizeImportedCookies("foo=bar"), /refresh_token/);
 });
