@@ -655,7 +655,6 @@ async function launchChromiumBrowser(options: LaunchOptions): Promise<PuppeteerB
 async function preparePage(page: BrowserPage, handle: BrowserSessionHandle): Promise<void> {
   if (handle.engine === "firefox") {
     await (page as PlaywrightPage).setViewportSize(handle.fingerprint.viewport);
-    await (page as PlaywrightPage).emulateMedia({ colorScheme: handle.fingerprint.colorScheme });
     await (page as PlaywrightPage).setExtraHTTPHeaders({
       "accept-language": handle.fingerprint.acceptLanguage,
     });
