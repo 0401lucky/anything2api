@@ -36,11 +36,14 @@ import {
   parseToolCallResponse,
   type ParsedToolCall,
 } from "./tool-calls.js";
+import { checkApiKey, parseApiKeys } from "./auth/api-key.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const ANYTHING_BASE_URL = process.env.ANYTHING_BASE_URL ?? "https://www.anything.com";
 const TRACE_DIR = path.resolve(process.cwd(), process.env.TRACE_DIR ?? "data/traces");
 const MAX_FAILOVER_ATTEMPTS = Number.parseInt(process.env.MAX_FAILOVER_ATTEMPTS ?? "4", 10);
+const API_KEYS = parseApiKeys(process.env.API_KEYS);
+const METRICS_TOKEN = process.env.METRICS_TOKEN?.trim() || null;
 interface OpenAIChatCompletionRequest {
   model?: string;
   messages?: Array<{ role?: string; content?: unknown }>;
@@ -81,6 +84,10 @@ interface ToolAwareGenerationResult {
 }
 
 export async function startApiServer(log: (message: string) => void = console.log): Promise<void> {
+  if (API_KEYS.length === 0) {
+    log("[FATAL] API_KEYS 环境变量未设置；启动被拒。请配置 API_KEYS=key1,key2 后再启动。");
+    process.exit(1);
+  }
   const backend = new AnythingProxyBackend(log);
   await backend.refreshPoolMetrics();
   const server = createServer(async (request, response) => {
@@ -287,12 +294,35 @@ async function routeRequest(
   }
 
   if (request.method === "GET" && url.pathname === "/metrics") {
+    if (METRICS_TOKEN) {
+      const token =
+        url.searchParams.get("token") ??
+        (request.headers["authorization"]?.toString().replace(/^Bearer\s+/i, "") ?? "");
+      if (token !== METRICS_TOKEN) {
+        sendJson(response, 401, { error: { message: "Unauthorized" } });
+        return;
+      }
+    }
     await backend.refreshPoolMetrics();
     response.writeHead(200, {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",
     });
     response.end(backend.metrics.renderPrometheus());
     return;
+  }
+
+  if (url.pathname.startsWith("/admin/")) {
+    sendJson(response, 503, { error: { message: "admin console not enabled in this build" } });
+    return;
+  }
+
+  if (url.pathname.startsWith("/v1/")) {
+    if (!checkApiKey(request, API_KEYS)) {
+      sendJson(response, 401, {
+        error: { message: "Invalid or missing API key", type: "authentication_error" },
+      });
+      return;
+    }
   }
 
   if (request.method === "GET" && url.pathname === "/v1/models") {
