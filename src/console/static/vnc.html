@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>VNC 登录</title>
+<style>body, html { margin: 0; height: 100%; overflow: hidden; } #screen { width: 100%; height: 100%; }</style>
+</head>
+<body>
+<div id="screen"></div>
+<script type="module">
+import RFB from "/admin/novnc/core/rfb.js";
+
+const params = new URLSearchParams(location.search);
+const sessionId = params.get("session");
+const wsProto = location.protocol === "https:" ? "wss" : "ws";
+const wsUrl = `${wsProto}://${location.host}/admin/vnc/${sessionId}`;
+const rfb = new RFB(document.getElementById("screen"), wsUrl);
+rfb.viewOnly = false;
+rfb.scaleViewport = true;
+
+setInterval(async () => {
+  const status = await (await fetch("/admin/api/login/status")).json();
+  if (status.status === "done") {
+    alert("登录完成: " + status.session.email);
+    location.href = "/admin/";
+  } else if (status.status === "failed" || status.status === "cancelled") {
+    alert("登录失败: " + (status.error || status.status));
+    location.href = "/admin/";
+  }
+}, 3000);
+</script>
+</body>
+</html>

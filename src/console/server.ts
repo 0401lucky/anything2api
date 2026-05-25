@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { AccountPool } from "../account-pool.js";
 import type { AccountSessionRecord } from "../account.js";
 import type { UsageTracker } from "../usage/tracker.js";
+import type { VncSupervisor } from "../vnc/supervisor.js";
 import { constantTimeStringEqual, ConsoleSessionStore, RateLimiter } from "../auth/console-session.js";
 
 const STATIC_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "static");
@@ -24,11 +25,25 @@ export interface ConsoleServerDeps {
   usage: UsageTracker | null;
   importArchive(stream: NodeJS.ReadableStream): Promise<AccountSessionRecord>;
   exportAccount(accountId: string): Promise<{ archivePath: string; cleanup: () => Promise<void> }>;
+  vnc: VncSupervisor;
+  loginInteractive(args: {
+    display: string;
+    log: (m: string) => void;
+    signal: AbortSignal;
+  }): Promise<AccountSessionRecord>;
 }
 
 export class ConsoleServer {
   private readonly sessions: ConsoleSessionStore;
   private readonly limiter: RateLimiter;
+  private loginState: {
+    vncSessionId: string;
+    status: "provisioning" | "waiting" | "detecting" | "done" | "failed" | "cancelled";
+    controller: AbortController;
+    error?: string;
+    session?: AccountSessionRecord;
+    startedAt: number;
+  } | null = null;
 
   public constructor(
     private readonly options: ConsoleServerOptions,
@@ -113,6 +128,70 @@ export class ConsoleServer {
       return;
     }
 
+    if (pathname === "/api/login/start" && request.method === "POST") {
+      if (this.loginState && ["provisioning", "waiting", "detecting"].includes(this.loginState.status)) {
+        this.sendJson(response, 409, { error: { message: "login already in progress" } });
+        return;
+      }
+      const vnc = await this.deps.vnc.start();
+      const state = {
+        vncSessionId: vnc.sessionId,
+        status: "provisioning" as const,
+        controller: new AbortController(),
+        startedAt: Date.now(),
+      };
+      this.loginState = state;
+      void (async () => {
+        try {
+          state.status = "waiting" as any;
+          const session = await this.deps.loginInteractive({
+            display: vnc.display,
+            log: (m) => console.log(m),
+            signal: state.controller.signal,
+          });
+          state.status = "done" as any;
+          (state as any).session = session;
+          await this.deps.pool.addPreparedSession(session);
+        } catch (error) {
+          state.status = "failed" as any;
+          (state as any).error = (error as Error).message;
+        } finally {
+          await this.deps.vnc.stopAny();
+        }
+      })();
+      this.sendJson(response, 200, { sessionId: vnc.sessionId, vncWsUrl: `/admin/vnc/${vnc.sessionId}` });
+      return;
+    }
+
+    if (pathname === "/api/login/status" && request.method === "GET") {
+      this.sendJson(response, 200, this.loginState ?? { status: "idle" });
+      return;
+    }
+
+    if (pathname === "/api/login/cancel" && request.method === "POST") {
+      if (this.loginState) {
+        this.loginState.controller.abort();
+        this.loginState.status = "cancelled";
+        await this.deps.vnc.stopAny();
+      }
+      this.sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (pathname.startsWith("/novnc/")) {
+      const sub = pathname.slice("/novnc/".length);
+      const novncRoot = process.env.NOVNC_DIR ?? "/usr/share/novnc";
+      const file = path.join(novncRoot, sub);
+      try {
+        await stat(file);
+        response.writeHead(200, { "content-type": guessContentType(file) });
+        createReadStream(file).pipe(response);
+      } catch {
+        this.sendJson(response, 404, { error: { message: "novnc asset not found" } });
+      }
+      return;
+    }
+
     if (pathname === "/" || pathname === "/index.html") {
       return this.serveStatic(response, "index.html");
     }
@@ -165,6 +244,17 @@ export class ConsoleServer {
     const token = parseCookie(request.headers.cookie)["a2a_console"];
     const entry = this.sessions.validate(token);
     return entry ? { user: entry.user } : null;
+  }
+
+  public requireSessionByToken(token: string | undefined): { user: string } | null {
+    const entry = this.sessions.validate(token);
+    return entry ? { user: entry.user } : null;
+  }
+
+  public getLoginStatus(): { vncSessionId: string; status: string } | null {
+    return this.loginState
+      ? { vncSessionId: this.loginState.vncSessionId, status: this.loginState.status }
+      : null;
   }
 
   private sendJson(response: ServerResponse, status: number, payload: unknown): void {

@@ -19,12 +19,14 @@
   "devDependencies": {
     "@types/node": "^24.6.0",
     "@types/tar": "^6.1.13",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.3"
   },
   "dependencies": {
     "puppeteer": "^24.40.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "tar": "^7.5.15"
+    "tar": "^7.5.15",
+    "ws": "^8.21.0"
   }
 }

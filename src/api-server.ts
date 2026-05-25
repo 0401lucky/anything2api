@@ -3,13 +3,15 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { WebSocketServer, WebSocket } from "ws";
+
 import {
   closeBrowserSession,
   generateProjectGroupRevisionViaGraphql,
   openBrowserSession,
   type BrowserSessionHandle,
 } from "./browser.js";
-import { type AccountSessionRecord } from "./account.js";
+import { loginInteractive, type AccountSessionRecord } from "./account.js";
 import { AccountPool, type PoolAccountRecord } from "./account-pool.js";
 import { MetricsRegistry } from "./metrics.js";
 import { SUPPORTED_MODEL_IDS, resolveModel } from "./model-catalog.js";
@@ -41,6 +43,7 @@ import { checkApiKey, parseApiKeys } from "./auth/api-key.js";
 import { packAccount, unpackAccount } from "./auth/packager.js";
 import { ConsoleServer } from "./console/server.js";
 import { UsageTracker } from "./usage/tracker.js";
+import { VncSupervisor } from "./vnc/supervisor.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const ANYTHING_BASE_URL = process.env.ANYTHING_BASE_URL ?? "https://www.anything.com";
@@ -151,6 +154,10 @@ export async function startApiServer(log: (message: string) => void = console.lo
             cleanup: async () => rm(tmpDir, { recursive: true, force: true }),
           };
         },
+        vnc: new VncSupervisor(),
+        loginInteractive: async ({ display, log, signal }) => {
+          return await loginInteractive({ display, log, signal, headless: false });
+        },
       },
     );
   }
@@ -178,6 +185,32 @@ export async function startApiServer(log: (message: string) => void = console.lo
     } finally {
       finishMetrics();
     }
+  });
+
+  const wsServer = new WebSocketServer({ noServer: true });
+
+  server.on("upgrade", (request, socket, head) => {
+    const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
+    if (!url.pathname.startsWith("/admin/vnc/")) {
+      socket.destroy();
+      return;
+    }
+    const sessionToken = parseCookieHeader(request.headers.cookie)["a2a_console"];
+    if (!consoleServer || !consoleServer.requireSessionByToken(sessionToken)) {
+      socket.destroy();
+      return;
+    }
+    const sessionId = url.pathname.split("/").pop();
+    const loginStatus = consoleServer.getLoginStatus();
+    if (loginStatus?.vncSessionId !== sessionId) {
+      socket.destroy();
+      return;
+    }
+
+    wsServer.handleUpgrade(request, socket, head, (clientWs) => {
+      const upstreamWs = new WebSocket("ws://127.0.0.1:6080/websockify");
+      bridgeWebSockets(clientWs, upstreamWs);
+    });
   });
 
   server.listen(PORT, () => {
@@ -1418,4 +1451,28 @@ async function pipeStreamToFile(input: NodeJS.ReadableStream, target: string): P
     ws.on("error", reject);
     input.on("error", reject);
   });
+}
+
+function bridgeWebSockets(a: WebSocket, b: WebSocket): void {
+  a.on("message", (data) => {
+    if (b.readyState === WebSocket.OPEN) b.send(data);
+  });
+  b.on("message", (data) => {
+    if (a.readyState === WebSocket.OPEN) a.send(data);
+  });
+  a.on("close", () => b.close());
+  b.on("close", () => a.close());
+  a.on("error", () => b.close());
+  b.on("error", () => a.close());
+}
+
+function parseCookieHeader(raw: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!raw) return result;
+  for (const part of raw.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    result[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+  }
+  return result;
 }

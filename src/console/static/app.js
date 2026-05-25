@@ -56,8 +56,14 @@ $("#logout-btn").addEventListener("click", async () => {
   location.href = "/admin/login";
 });
 
-$("#add-account-btn").addEventListener("click", () => {
-  alert("添加账号功能将在 VNC Task 完成后启用");
+$("#add-account-btn").addEventListener("click", async () => {
+  try {
+    const data = await api("POST", "/api/login/start");
+    const url = `/admin/vnc.html?session=${data.sessionId}`;
+    window.open(url, "_blank", "width=1320,height=900");
+  } catch (error) {
+    alert("启动登录失败: " + error.message);
+  }
 });
 
 $("#import-btn").addEventListener("click", () => $("#import-file").click());

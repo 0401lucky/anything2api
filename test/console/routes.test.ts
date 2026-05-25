@@ -29,6 +29,13 @@ function makeDeps(): import("../../src/console/server.js").ConsoleServerDeps {
     usage: null,
     importArchive: async () => ({}) as any,
     exportAccount: async () => ({ archivePath: "", cleanup: async () => undefined }),
+    vnc: {
+      start: async () => ({ sessionId: "x", display: ":99", wsPort: 6080 }),
+      stop: async () => undefined,
+      stopAny: async () => undefined,
+      getStatus: () => ({ running: false }),
+    } as any,
+    loginInteractive: async () => ({}) as any,
   };
 }
 
