@@ -28,6 +28,10 @@ export function buildCookieHeader(cookies: readonly StoredCookie[]): string {
     .join("; ");
 }
 
+export function findCookieValue(cookies: readonly StoredCookie[], name: string): string | null {
+  return cookies.find((cookie) => cookie.name === name && cookie.value)?.value ?? null;
+}
+
 function parseCookieText(value: string): unknown {
   const trimmed = value.trim();
   if (!trimmed) {

@@ -13,7 +13,7 @@ import type {
 
 import { resolveModel } from "./model-catalog.js";
 import type { StableFingerprint } from "./fingerprint.js";
-import { buildCookieHeader, type StoredCookie } from "./cookies.js";
+import { buildCookieHeader, findCookieValue, type StoredCookie } from "./cookies.js";
 import { formatError } from "./util/error.js";
 
 const puppeteerExtra = puppeteerExtraModule as unknown as {
@@ -993,25 +993,32 @@ async function directGraphqlRequest(
   payload: Record<string, unknown>,
   options: { fingerprint?: StableFingerprint; referer?: string } = {},
 ): Promise<Record<string, unknown>> {
+  const authToken = findCookieValue(cookies, "lS_authToken");
+  const headers: Record<string, string> = {
+    accept: "application/graphql-response+json,application/json;q=0.9",
+    "accept-language": options.fingerprint?.acceptLanguage ?? "zh-CN,zh;q=0.9,en;q=0.8",
+    "apollographql-client-name": "flux-web",
+    "content-type": "application/json",
+    cookie: buildCookieHeader(cookies),
+    origin: new URL(ANYTHING_BASE_URL).origin,
+    referer: options.referer || ANYTHING_BASE_URL,
+    "user-agent": options.fingerprint?.userAgent ?? "Mozilla/5.0",
+  };
+  if (authToken) {
+    headers.authorization = authToken;
+  }
+
   const response = await fetch(new URL("/api/graphql", ANYTHING_BASE_URL), {
     method: "POST",
-    headers: {
-      accept: "application/graphql-response+json,application/json;q=0.9",
-      "accept-language": options.fingerprint?.acceptLanguage ?? "zh-CN,zh;q=0.9,en;q=0.8",
-      "apollographql-client-name": "flux-web",
-      "content-type": "application/json",
-      cookie: buildCookieHeader(cookies),
-      origin: ANYTHING_BASE_URL,
-      referer: options.referer || ANYTHING_BASE_URL,
-      "user-agent": options.fingerprint?.userAgent ?? "Mozilla/5.0",
-    },
+    headers,
     body: JSON.stringify(payload),
   });
   const text = await response.text();
 
   if (response.status < 200 || response.status >= 300) {
+    const authHint = buildDirectGraphqlAuthHint(cookies, response.status);
     const err = new Error(
-      `GraphQL HTTP ${response.status}: ${truncate(text, 300) ?? ""}`,
+      `GraphQL HTTP ${response.status}: ${truncate(text, 300) ?? ""}${authHint}`,
     ) as Error & { status?: number; retryAfter?: string | null };
     err.status = response.status;
     err.retryAfter = response.headers.get("retry-after");
@@ -1023,6 +1030,18 @@ async function directGraphqlRequest(
   } catch (error) {
     throw new Error(`GraphQL 返回了无效 JSON: ${formatError(error)} / ${truncate(text, 500)}`);
   }
+}
+
+function buildDirectGraphqlAuthHint(cookies: readonly StoredCookie[], status: number): string {
+  if (status !== 401 && status !== 403) {
+    return "";
+  }
+
+  if (!findCookieValue(cookies, "lS_authToken") && findCookieValue(cookies, "refresh_token")) {
+    return "\n检测到 refresh_token，但没有 lS_authToken。anything 的 GraphQL 请求还需要短期 lS_authToken，并且要放在 authorization 请求头里；请导出完整 Cookie 后重试。";
+  }
+
+  return "";
 }
 
 function buildMePayload(): Record<string, unknown> {

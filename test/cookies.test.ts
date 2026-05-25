@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildCookieHeader, normalizeImportedCookies } from "../src/cookies.js";
+import { buildCookieHeader, findCookieValue, normalizeImportedCookies } from "../src/cookies.js";
 
 test("normalizeImportedCookies accepts Cookie-Editor JSON", () => {
   const cookies = normalizeImportedCookies(JSON.stringify([
@@ -29,6 +29,12 @@ test("normalizeImportedCookies accepts refresh_token", () => {
   const cookies = normalizeImportedCookies("foo=bar; refresh_token=token");
   assert.equal(cookies.length, 2);
   assert.equal(buildCookieHeader(cookies), "foo=bar; refresh_token=token");
+});
+
+test("findCookieValue returns the exact cookie value", () => {
+  const cookies = normalizeImportedCookies("refresh_token=refresh; lS_authToken=auth");
+  assert.equal(findCookieValue(cookies, "lS_authToken"), "auth");
+  assert.equal(findCookieValue(cookies, "missing"), null);
 });
 
 test("normalizeImportedCookies requires a likely auth cookie", () => {
