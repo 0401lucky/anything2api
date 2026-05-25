@@ -148,6 +148,30 @@ test("reactivateAccount clears cooldown and deleted status", async () => {
   }
 });
 
+test("updateSessionCookies persists refreshed cookies", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pool-cookies-"));
+  const previous = process.env.DATA_DIR;
+  process.env.DATA_DIR = tempDir;
+
+  try {
+    const { AccountPool } = await import(`../src/account-pool.js?case=${Date.now()}`);
+    const pool = new AccountPool(() => {});
+
+    await pool.addPreparedSession(makeSession("ck", tempDir) as never);
+    const account = await pool.acquireAccount();
+    await pool.updateSessionCookies(account.accountId, [
+      { name: "refresh_token", value: "new", domain: ".anything.com", path: "/" },
+    ]);
+
+    const accounts = await pool.listAccounts();
+    assert.equal(accounts[0]?.cookies?.[0]?.value, "new");
+  } finally {
+    if (previous === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = previous;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("markImmediateCooldown skips strike accumulation", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "pool-imm-"));
   const previous = process.env.DATA_DIR;

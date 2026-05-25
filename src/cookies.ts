@@ -32,6 +32,23 @@ export function findCookieValue(cookies: readonly StoredCookie[], name: string):
   return cookies.find((cookie) => cookie.name === name && cookie.value)?.value ?? null;
 }
 
+export function mergeCookies(
+  cookies: readonly StoredCookie[],
+  updates: readonly StoredCookie[],
+): StoredCookie[] {
+  return dedupeCookies([...cookies, ...updates]);
+}
+
+export function parseSetCookieHeaders(
+  setCookieHeaders: readonly string[],
+  defaultDomain = ".anything.com",
+): StoredCookie[] {
+  return setCookieHeaders
+    .flatMap(splitSetCookieHeader)
+    .map((header) => parseSetCookieHeader(header, defaultDomain))
+    .filter((cookie): cookie is StoredCookie => cookie !== null);
+}
+
 function parseCookieText(value: string): unknown {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -112,9 +129,66 @@ function normalizeCookie(value: unknown): StoredCookie | null {
 function dedupeCookies(cookies: StoredCookie[]): StoredCookie[] {
   const byKey = new Map<string, StoredCookie>();
   for (const cookie of cookies) {
-    byKey.set(`${cookie.domain ?? ""}\n${cookie.path ?? ""}\n${cookie.name}`, cookie);
+    byKey.set(cookie.name, cookie);
   }
   return [...byKey.values()];
+}
+
+function splitSetCookieHeader(value: string): string[] {
+  return value
+    .split(/,(?=\s*[^;,=\s]+=)/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseSetCookieHeader(value: string, defaultDomain: string): StoredCookie | null {
+  const segments = value.split(";").map((item) => item.trim()).filter(Boolean);
+  const firstSegment = segments[0];
+  if (!firstSegment) {
+    return null;
+  }
+
+  const separatorIndex = firstSegment.indexOf("=");
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const cookie: StoredCookie = {
+    name: firstSegment.slice(0, separatorIndex).trim(),
+    value: firstSegment.slice(separatorIndex + 1).trim(),
+    domain: defaultDomain,
+    path: "/",
+  };
+
+  for (const segment of segments.slice(1)) {
+    const [rawName, ...rawValueParts] = segment.split("=");
+    const attributeName = rawName?.trim().toLowerCase();
+    const attributeValue = rawValueParts.join("=").trim();
+
+    if (attributeName === "domain" && attributeValue) {
+      cookie.domain = attributeValue;
+    } else if (attributeName === "path" && attributeValue) {
+      cookie.path = attributeValue;
+    } else if (attributeName === "expires" && attributeValue) {
+      const expiresMs = Date.parse(attributeValue);
+      if (Number.isFinite(expiresMs)) {
+        cookie.expires = Math.floor(expiresMs / 1000);
+      }
+    } else if (attributeName === "max-age" && attributeValue) {
+      const maxAge = Number.parseInt(attributeValue, 10);
+      if (Number.isFinite(maxAge)) {
+        cookie.expires = Math.floor(Date.now() / 1000) + maxAge;
+      }
+    } else if (attributeName === "httponly") {
+      cookie.httpOnly = true;
+    } else if (attributeName === "secure") {
+      cookie.secure = true;
+    } else if (attributeName === "samesite" && attributeValue) {
+      cookie.sameSite = attributeValue;
+    }
+  }
+
+  return cookie.name ? cookie : null;
 }
 
 function isLikelyAuthCookie(cookie: StoredCookie): boolean {

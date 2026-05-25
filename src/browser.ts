@@ -13,7 +13,13 @@ import type {
 
 import { resolveModel } from "./model-catalog.js";
 import type { StableFingerprint } from "./fingerprint.js";
-import { buildCookieHeader, findCookieValue, type StoredCookie } from "./cookies.js";
+import {
+  buildCookieHeader,
+  findCookieValue,
+  mergeCookies,
+  parseSetCookieHeaders,
+  type StoredCookie,
+} from "./cookies.js";
 import { formatError } from "./util/error.js";
 
 const puppeteerExtra = puppeteerExtraModule as unknown as {
@@ -428,6 +434,7 @@ export interface InteractiveLoginResult {
   userId: string;
   email: string;
   projectGroupId: string;
+  cookies?: StoredCookie[];
 }
 
 export async function probeCookieSession(options: {
@@ -435,7 +442,12 @@ export async function probeCookieSession(options: {
   fingerprint?: StableFingerprint;
   finalUrl?: string;
 }): Promise<InteractiveLoginResult> {
-  const meResponse = await directGraphqlRequest(options.cookies, buildMePayload(), {
+  const cookies = await hydrateCookieSession(options.cookies, {
+    fingerprint: options.fingerprint,
+    referer: options.finalUrl,
+  });
+
+  const meResponse = await directGraphqlRequest(cookies, buildMePayload(), {
     fingerprint: options.fingerprint,
     referer: options.finalUrl,
   });
@@ -446,7 +458,7 @@ export async function probeCookieSession(options: {
     throw new Error(`Cookie 登录校验失败，未读取到用户信息: ${JSON.stringify(meResponse, null, 2)}`);
   }
 
-  const groupResponse = await directGraphqlRequest(options.cookies, buildProjectGroupsPayload(), {
+  const groupResponse = await directGraphqlRequest(cookies, buildProjectGroupsPayload(), {
     fingerprint: options.fingerprint,
     referer: options.finalUrl,
   });
@@ -462,6 +474,7 @@ export async function probeCookieSession(options: {
     userId,
     email,
     projectGroupId,
+    cookies,
   };
 }
 
@@ -474,10 +487,21 @@ export async function generateProjectGroupRevisionViaCookies(options: {
   preferredModel?: string;
   log?: (message: string) => void;
   onUpdate?: (rawText: string, status: string) => Promise<void> | void;
+  onCookiesUpdated?: (cookies: StoredCookie[]) => Promise<void> | void;
 }): Promise<GraphqlGenerationResult> {
   const resolvedModel = resolveModel(options.preferredModel);
+  const cookies = await hydrateCookieSession(options.cookies, {
+    fingerprint: options.fingerprint,
+    referer: options.targetUrl,
+  });
+  const initialCookieHeader = buildCookieHeader(cookies);
+  const persistCookieUpdates = async () => {
+    if (buildCookieHeader(cookies) !== initialCookieHeader) {
+      await options.onCookiesUpdated?.(cookies);
+    }
+  };
   const generateResult = await directGraphqlRequest(
-    options.cookies,
+    cookies,
     buildGenerateProjectGroupRevisionPayload({
       projectGroupId: options.projectGroupId,
       prompt: options.prompt,
@@ -503,6 +527,7 @@ export async function generateProjectGroupRevisionViaCookies(options: {
 
   if (immediateResponse.trim()) {
     await options.onUpdate?.(immediateResponse, status || "COMPLETED");
+    await persistCookieUpdates();
     return {
       revisionId,
       status: status || "COMPLETED",
@@ -513,7 +538,7 @@ export async function generateProjectGroupRevisionViaCookies(options: {
   for (let attempt = 1; attempt <= 60; attempt += 1) {
     await delay(2_000);
     const pollResult = await directGraphqlRequest(
-      options.cookies,
+      cookies,
       buildLatestRevisionPayload(options.projectGroupId),
       {
         fingerprint: options.fingerprint,
@@ -537,6 +562,7 @@ export async function generateProjectGroupRevisionViaCookies(options: {
     }
 
     if (latestResponse.trim()) {
+      await persistCookieUpdates();
       return {
         revisionId,
         status: latestStatus || "COMPLETED",
@@ -549,6 +575,7 @@ export async function generateProjectGroupRevisionViaCookies(options: {
     }
   }
 
+  await persistCookieUpdates();
   throw new Error(`等待生成结果超时: revision=${revisionId}, status=${status}`);
 }
 
@@ -989,7 +1016,7 @@ async function graphqlRequest(
 }
 
 async function directGraphqlRequest(
-  cookies: readonly StoredCookie[],
+  cookies: StoredCookie[],
   payload: Record<string, unknown>,
   options: { fingerprint?: StableFingerprint; referer?: string } = {},
 ): Promise<Record<string, unknown>> {
@@ -1013,6 +1040,7 @@ async function directGraphqlRequest(
     headers,
     body: JSON.stringify(payload),
   });
+  mergeResponseCookies(cookies, response);
   const text = await response.text();
 
   if (response.status < 200 || response.status >= 300) {
@@ -1032,13 +1060,125 @@ async function directGraphqlRequest(
   }
 }
 
+async function hydrateCookieSession(
+  sourceCookies: readonly StoredCookie[],
+  options: { fingerprint?: StableFingerprint; referer?: string } = {},
+): Promise<StoredCookie[]> {
+  let cookies = [...sourceCookies];
+  if (isAuthTokenFresh(cookies) || !findCookieValue(cookies, "refresh_token")) {
+    return cookies;
+  }
+
+  const origin = new URL(ANYTHING_BASE_URL).origin;
+  const candidates = [
+    options.referer,
+    `${origin}/dashboard`,
+    origin,
+  ].filter((item): item is string => Boolean(item?.trim()));
+
+  for (const candidate of candidates) {
+    cookies = await fetchPageAndMergeCookies(candidate, cookies, options);
+    if (isAuthTokenFresh(cookies)) {
+      break;
+    }
+  }
+
+  return cookies;
+}
+
+async function fetchPageAndMergeCookies(
+  url: string,
+  sourceCookies: readonly StoredCookie[],
+  options: { fingerprint?: StableFingerprint; referer?: string },
+): Promise<StoredCookie[]> {
+  let cookies = [...sourceCookies];
+  let currentUrl = url;
+
+  for (let redirectCount = 0; redirectCount < 5; redirectCount += 1) {
+    let response: Response;
+    try {
+      response = await fetch(currentUrl, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": options.fingerprint?.acceptLanguage ?? "zh-CN,zh;q=0.9,en;q=0.8",
+          cookie: buildCookieHeader(cookies),
+          referer: options.referer || ANYTHING_BASE_URL,
+          "upgrade-insecure-requests": "1",
+          "user-agent": options.fingerprint?.userAgent ?? "Mozilla/5.0",
+        },
+      });
+    } catch {
+      return cookies;
+    }
+
+    const responseCookies = extractResponseCookies(response);
+    if (responseCookies.length > 0) {
+      cookies = mergeCookies(cookies, responseCookies);
+    }
+
+    const location = response.headers.get("location");
+    if (!location || response.status < 300 || response.status >= 400) {
+      return cookies;
+    }
+
+    currentUrl = new URL(location, currentUrl).toString();
+  }
+
+  return cookies;
+}
+
+function mergeResponseCookies(cookies: StoredCookie[], response: Response): void {
+  const updates = extractResponseCookies(response);
+  if (updates.length === 0) {
+    return;
+  }
+
+  const merged = mergeCookies(cookies, updates);
+  cookies.splice(0, cookies.length, ...merged);
+}
+
+function extractResponseCookies(response: Response): StoredCookie[] {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  const setCookieHeaders = headers.getSetCookie?.() ?? [];
+  const fallbackHeader = setCookieHeaders.length === 0 ? response.headers.get("set-cookie") : null;
+  return parseSetCookieHeaders(fallbackHeader ? [fallbackHeader] : setCookieHeaders);
+}
+
+function isAuthTokenFresh(cookies: readonly StoredCookie[]): boolean {
+  const authToken = findCookieValue(cookies, "lS_authToken");
+  if (!authToken) {
+    return false;
+  }
+
+  const exp = readJwtExp(authToken);
+  return exp === null || exp * 1000 - Date.now() > 60_000;
+}
+
+function readJwtExp(jwt: string): number | null {
+  const payload = jwt.split(".")[1];
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const decoded = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as { exp?: unknown };
+    return typeof decoded.exp === "number" ? decoded.exp : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildDirectGraphqlAuthHint(cookies: readonly StoredCookie[], status: number): string {
   if (status !== 401 && status !== 403) {
     return "";
   }
 
   if (!findCookieValue(cookies, "lS_authToken") && findCookieValue(cookies, "refresh_token")) {
-    return "\n检测到 refresh_token，但没有 lS_authToken。anything 的 GraphQL 请求还需要短期 lS_authToken，并且要放在 authorization 请求头里；请导出完整 Cookie 后重试。";
+    return "\n检测到 refresh_token，但自动请求页面后仍没有拿到 lS_authToken。anything 的 GraphQL 请求还需要短期 lS_authToken，并且要放在 authorization 请求头里；请在本机真实浏览器里重新打开 anything.com 后再导出 Cookie。";
   }
 
   return "";

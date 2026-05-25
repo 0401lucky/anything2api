@@ -367,6 +367,10 @@ class AnythingProxyBackend {
             onUpdate: async (rawText, status) => {
               await onUpdate?.(rawText, status, resolvedModel.canonical, account);
             },
+            onCookiesUpdated: async (cookies) => {
+              account.cookies = cookies;
+              await this.pool.updateSessionCookies(account.accountId, cookies);
+            },
           })
         : await generateProjectGroupRevisionViaGraphql({
             handle: await this.ensureBrowser(account),

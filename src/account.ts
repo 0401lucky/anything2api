@@ -101,15 +101,17 @@ export async function createSessionFromCookies(
     cookies,
     finalUrl: options.finalUrl,
   });
+  const probedCookies = probe.cookies ?? cookies;
 
   const targetDir = getAccountDir(probe.email);
   await mkdir(targetDir, { recursive: true });
   const fingerprint = await loadOrCreateFingerprint(targetDir, probe.email);
   const verified = await probeCookieSession({
-    cookies,
+    cookies: probedCookies,
     fingerprint,
     finalUrl: options.finalUrl,
   });
+  const verifiedCookies = verified.cookies ?? probedCookies;
 
   const session: AccountSessionRecord = {
     version: 1,
@@ -123,7 +125,7 @@ export async function createSessionFromCookies(
     title: verified.title,
     createdAt: formatLocalTimestamp(new Date()),
     fingerprint,
-    cookies,
+    cookies: verifiedCookies,
   };
 
   await writeFile(path.join(targetDir, "session.json"), `${JSON.stringify(session, null, 2)}\n`, "utf8");

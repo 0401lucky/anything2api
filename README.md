@@ -26,7 +26,7 @@ docker compose -f my.yml up -d
 
 打开 `http://127.0.0.1:7860/admin/login` → 输入 `WEB_CONSOLE_PASSWORD` → 点「添加账号」→ 在弹出的 noVNC 页面里完成 Google 登录。
 
-如果云端 noVNC 被 Vercel Security Checkpoint 拦截，可在本机真实浏览器登录 `https://www.anything.com`，用 Cookie-Editor 一类工具导出 `anything.com` 的完整 Cookie JSON，然后在控制台点「导入 Cookie」。最好同时包含 `lS_authToken` 和 `refresh_token`：`lS_authToken` 会同步放进 GraphQL 的 `authorization` 请求头；如果只导出到 `refresh_token`，导入器会提示还缺短期 token。系统会用 Cookie 直连 GraphQL，不再依赖云端浏览器打开登录页。
+如果云端 noVNC 被 Vercel Security Checkpoint 拦截，可在本机真实浏览器登录 `https://www.anything.com`，用 Cookie-Editor 一类工具导出 `anything.com` 的 Cookie JSON，然后在控制台点「导入 Cookie」。最好同时包含 `lS_authToken` 和 `refresh_token`；如果只能导出到 `refresh_token`，系统会先请求 anything 页面收集服务端补发的 `Set-Cookie`，再尝试直连 GraphQL。导入成功后不再依赖云端浏览器打开登录页。
 
 之后客户端就可以用：
 

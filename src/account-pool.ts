@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AccountSessionRecord } from "./account.js";
+import type { StoredCookie } from "./cookies.js";
 import { formatError } from "./util/error.js";
 import { formatLocalTimestamp } from "./util/time.js";
 
@@ -142,6 +143,20 @@ export class AccountPool {
       state.updatedAt = formatLocalTimestamp(new Date());
       await this.saveState(state);
       return account;
+    });
+  }
+
+  public async updateSessionCookies(accountId: string, cookies: StoredCookie[]): Promise<void> {
+    await this.runExclusive(async () => {
+      const state = await this.loadState();
+      const account = state.accounts.find((item) => item.accountId === accountId);
+      if (!account) {
+        return;
+      }
+
+      account.cookies = cookies;
+      state.updatedAt = formatLocalTimestamp(new Date());
+      await this.saveState(state);
     });
   }
 

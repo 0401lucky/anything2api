@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildCookieHeader, findCookieValue, normalizeImportedCookies } from "../src/cookies.js";
+import {
+  buildCookieHeader,
+  findCookieValue,
+  mergeCookies,
+  normalizeImportedCookies,
+  parseSetCookieHeaders,
+} from "../src/cookies.js";
 
 test("normalizeImportedCookies accepts Cookie-Editor JSON", () => {
   const cookies = normalizeImportedCookies(JSON.stringify([
@@ -35,6 +41,27 @@ test("findCookieValue returns the exact cookie value", () => {
   const cookies = normalizeImportedCookies("refresh_token=refresh; lS_authToken=auth");
   assert.equal(findCookieValue(cookies, "lS_authToken"), "auth");
   assert.equal(findCookieValue(cookies, "missing"), null);
+});
+
+test("parseSetCookieHeaders parses combined Set-Cookie values", () => {
+  const cookies = parseSetCookieHeaders([
+    "lS_authToken=auth; Path=/; Domain=www.anything.com; HttpOnly; Secure; SameSite=Lax, refresh_token=refresh; Path=/; Secure",
+  ]);
+
+  assert.equal(cookies.length, 2);
+  assert.equal(cookies[0]?.name, "lS_authToken");
+  assert.equal(cookies[0]?.domain, "www.anything.com");
+  assert.equal(cookies[0]?.httpOnly, true);
+  assert.equal(cookies[1]?.name, "refresh_token");
+});
+
+test("mergeCookies replaces cookies by domain path and name", () => {
+  const base = normalizeImportedCookies("refresh_token=old; lS_authToken=auth");
+  const merged = mergeCookies(base, [{ name: "refresh_token", value: "new", domain: "www.anything.com", path: "/" }]);
+
+  assert.equal(findCookieValue(merged, "refresh_token"), "new");
+  assert.equal(findCookieValue(merged, "lS_authToken"), "auth");
+  assert.equal(buildCookieHeader(merged).match(/refresh_token=/g)?.length, 1);
 });
 
 test("normalizeImportedCookies requires a likely auth cookie", () => {
