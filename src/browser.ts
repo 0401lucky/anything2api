@@ -466,11 +466,13 @@ async function launchBrowser(options: LaunchOptions): Promise<Browser> {
   try {
     return await puppeteerExtra.launch({
       headless,
+      ignoreDefaultArgs: ["--enable-automation"],
       ignoreHTTPSErrors: true,
       userDataDir: path.join(options.accountDir, "user-data"),
       defaultViewport: null,
       args: [
         "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
         "--disable-dev-shm-usage",
         "--ignore-certificate-errors",
         "--no-sandbox",
@@ -790,6 +792,13 @@ function applyFingerprint(fingerprint: StableFingerprint): void {
     });
   };
 
+  try {
+    delete (Navigator.prototype as unknown as Record<string, unknown>).webdriver;
+  } catch {
+    // ignore
+  }
+
+  defineValue(navigator, "webdriver", undefined);
   defineValue(navigator, "platform", fingerprint.platform);
   defineValue(navigator, "language", fingerprint.locale);
   defineValue(navigator, "languages", fingerprint.acceptLanguage.split(",").map((item) => item.split(";")[0] ?? item));
