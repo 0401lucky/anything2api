@@ -15,18 +15,25 @@ FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      chromium \
-      curl unzip \
-      fonts-noto-cjk fonts-noto-color-emoji \
-      xvfb x11vnc fluxbox \
-      websockify python3 \
-      ca-certificates dumb-init procps \
-      libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
-      libcups2 libdbus-1-3 libdbus-glib-1-2 libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
-      libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxext6 \
-      libxfixes3 libxrandr2 libxrender1 libxshmfence1 libxss1 libxt6 libxtst6 \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    for attempt in 1 2 3; do \
+      apt-get -o Acquire::Retries=5 update && \
+      apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        chromium \
+        curl unzip \
+        fonts-noto-cjk fonts-noto-color-emoji \
+        xvfb x11vnc fluxbox \
+        websockify python3 \
+        ca-certificates dumb-init procps \
+        libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+        libcups2 libdbus-1-3 libdbus-glib-1-2 libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
+        libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxext6 \
+        libxfixes3 libxrandr2 libxrender1 libxshmfence1 libxss1 libxt6 libxtst6 && \
+      break; \
+      if [ "$attempt" = "3" ]; then exit 1; fi; \
+      sleep 5; \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_SKIP_DOWNLOAD=true \
@@ -57,14 +64,17 @@ RUN set -eux; \
     fi; \
     mkdir -p /app/camoufox-linux /tmp/camoufox; \
     curl -fsSL "$CAMOUFOX_URL" -o /tmp/camoufox.zip; \
-    unzip -q /tmp/camoufox.zip -d /tmp/camoufox; \
-    if [ -f /tmp/camoufox/camoufox ]; then \
-      mv /tmp/camoufox/* /app/camoufox-linux/; \
-    else \
-      mv /tmp/camoufox/*/* /app/camoufox-linux/; \
+    unzip -q /tmp/camoufox.zip -d /tmp/camoufox || true; \
+    camoufox_bin="$(find /tmp/camoufox -type f -name camoufox | head -n 1)"; \
+    if [ -z "$camoufox_bin" ]; then \
+      echo "Camoufox executable not found in archive"; \
+      find /tmp/camoufox -maxdepth 3 -type f | sort | head -n 50; \
+      exit 1; \
     fi; \
+    cp -a "$(dirname "$camoufox_bin")/." /app/camoufox-linux/; \
     rm -rf /tmp/camoufox /tmp/camoufox.zip; \
-    chmod +x /app/camoufox-linux/camoufox
+    chmod +x /app/camoufox-linux/camoufox; \
+    test -x /app/camoufox-linux/camoufox
 
 RUN useradd -m -s /bin/bash app \
  && mkdir -p /app/data \
