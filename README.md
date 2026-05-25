@@ -26,6 +26,8 @@ docker compose -f my.yml up -d
 
 打开 `http://127.0.0.1:7860/admin/login` → 输入 `WEB_CONSOLE_PASSWORD` → 点「添加账号」→ 在弹出的 noVNC 页面里完成 Google 登录。
 
+如果云端 noVNC 被 Vercel Security Checkpoint 拦截，可在本机真实浏览器登录 `https://www.anything.com`，用 Cookie-Editor 一类工具导出 `anything.com` Cookie JSON，然后在控制台点「导入 Cookie」。系统会用 Cookie 直连 GraphQL，不再依赖云端浏览器打开登录页。
+
 之后客户端就可以用：
 
 ```bash
@@ -134,6 +136,7 @@ Prometheus / Grafana 部署文件在 `deploy/` 目录。
 - `npm run accounts:reactivate -- <accountId>`：把账号从 cooldown / deleted 拉回 active
 - `npm run accounts:export -- <accountId> <out.tar.gz>`：导出账号包
 - `npm run accounts:import -- <archive.tar.gz>`：导入账号包
+- `npm run accounts:import-cookies -- <cookies.json> [finalUrl]`：从本机浏览器导出的 Cookie JSON 导入账号
 
 ## 测试
 

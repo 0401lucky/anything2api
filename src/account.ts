@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { closeBrowserSession, openBrowserSession, runInteractiveLogin } from "./browser.js";
+import { closeBrowserSession, openBrowserSession, probeCookieSession, runInteractiveLogin } from "./browser.js";
 import type { BrowserEngine } from "./browser.js";
+import { normalizeImportedCookies, type StoredCookie } from "./cookies.js";
 import type { StableFingerprint } from "./fingerprint.js";
 import { loadOrCreateFingerprint } from "./fingerprint.js";
 import { formatError } from "./util/error.js";
@@ -22,6 +23,7 @@ export interface AccountSessionRecord {
   createdAt: string;
   fingerprint: StableFingerprint;
   browserEngine?: BrowserEngine;
+  cookies?: StoredCookie[];
 }
 
 const DATA_DIR = path.resolve(process.cwd(), process.env.DATA_DIR ?? "data");
@@ -60,6 +62,7 @@ export function summarizeSession(session: AccountSessionRecord): string {
       finalUrl: session.finalUrl,
       accountDir: session.accountDir,
       browserEngine: session.browserEngine ?? "chromium",
+      cookieCount: session.cookies?.length ?? 0,
     },
     null,
     2,
@@ -81,6 +84,52 @@ export interface LoginInteractiveOptions {
   log?: (message: string) => void;
   timeoutMs?: number;
   signal?: AbortSignal;
+}
+
+export interface CookieSessionImportOptions {
+  cookies: unknown;
+  finalUrl?: string;
+  log?: (message: string) => void;
+}
+
+export async function createSessionFromCookies(
+  options: CookieSessionImportOptions,
+): Promise<AccountSessionRecord> {
+  const log = options.log ?? console.log;
+  const cookies = normalizeImportedCookies(options.cookies);
+  const probe = await probeCookieSession({
+    cookies,
+    finalUrl: options.finalUrl,
+  });
+
+  const targetDir = getAccountDir(probe.email);
+  await mkdir(targetDir, { recursive: true });
+  const fingerprint = await loadOrCreateFingerprint(targetDir, probe.email);
+  const verified = await probeCookieSession({
+    cookies,
+    fingerprint,
+    finalUrl: options.finalUrl,
+  });
+
+  const session: AccountSessionRecord = {
+    version: 1,
+    accountId: createAccountId(verified.email),
+    accountDir: targetDir,
+    email: verified.email,
+    mailboxKey: "",
+    userId: verified.userId,
+    projectGroupId: verified.projectGroupId,
+    finalUrl: verified.finalUrl,
+    title: verified.title,
+    createdAt: formatLocalTimestamp(new Date()),
+    fingerprint,
+    cookies,
+  };
+
+  await writeFile(path.join(targetDir, "session.json"), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  await saveLatestSession(session);
+  log(`[+] Cookie 账号会话已保存: ${path.join(targetDir, "session.json")}`);
+  return session;
 }
 
 export async function loginInteractive(

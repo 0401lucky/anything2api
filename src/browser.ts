@@ -13,6 +13,7 @@ import type {
 
 import { resolveModel } from "./model-catalog.js";
 import type { StableFingerprint } from "./fingerprint.js";
+import { buildCookieHeader, type StoredCookie } from "./cookies.js";
 import { formatError } from "./util/error.js";
 
 const puppeteerExtra = puppeteerExtraModule as unknown as {
@@ -427,6 +428,128 @@ export interface InteractiveLoginResult {
   userId: string;
   email: string;
   projectGroupId: string;
+}
+
+export async function probeCookieSession(options: {
+  cookies: readonly StoredCookie[];
+  fingerprint?: StableFingerprint;
+  finalUrl?: string;
+}): Promise<InteractiveLoginResult> {
+  const meResponse = await directGraphqlRequest(options.cookies, buildMePayload(), {
+    fingerprint: options.fingerprint,
+    referer: options.finalUrl,
+  });
+  const me = asRecord(asRecord(meResponse.data).me);
+  const userId = asString(me.id);
+  const email = asString(me.email);
+  if (!userId || !email) {
+    throw new Error(`Cookie 登录校验失败，未读取到用户信息: ${JSON.stringify(meResponse, null, 2)}`);
+  }
+
+  const groupResponse = await directGraphqlRequest(options.cookies, buildProjectGroupsPayload(), {
+    fingerprint: options.fingerprint,
+    referer: options.finalUrl,
+  });
+  const edges = asRecord(asRecord(groupResponse.data).projectGroups).edges;
+  const projectGroupId = Array.isArray(edges) ? asString(asRecord(asRecord(edges[0]).node).id) : "";
+  if (!projectGroupId) {
+    throw new Error("当前账号还没有任何项目，请先在本机浏览器里打开 anything.com 新建一个项目。");
+  }
+
+  return {
+    finalUrl: options.finalUrl || ANYTHING_BASE_URL,
+    title: "Anything Cookie Session",
+    userId,
+    email,
+    projectGroupId,
+  };
+}
+
+export async function generateProjectGroupRevisionViaCookies(options: {
+  cookies: readonly StoredCookie[];
+  fingerprint: StableFingerprint;
+  targetUrl: string;
+  projectGroupId: string;
+  prompt: string;
+  preferredModel?: string;
+  log?: (message: string) => void;
+  onUpdate?: (rawText: string, status: string) => Promise<void> | void;
+}): Promise<GraphqlGenerationResult> {
+  const resolvedModel = resolveModel(options.preferredModel);
+  const generateResult = await directGraphqlRequest(
+    options.cookies,
+    buildGenerateProjectGroupRevisionPayload({
+      projectGroupId: options.projectGroupId,
+      prompt: options.prompt,
+      resolvedModel,
+    }),
+    {
+      fingerprint: options.fingerprint,
+      referer: options.targetUrl,
+    },
+  );
+
+  const generatePayload = asRecord(generateResult.data)?.generateProjectGroupRevisionFromChat;
+  const generation = asRecord(generatePayload);
+  const revision = asRecord(generation.projectGroupRevision);
+  const revisionId = asString(revision.id);
+  const status = asString(revision.status);
+  const immediateResponse = asString(revision.response);
+  const errors = generation.errors;
+
+  if (!revisionId) {
+    throw new Error(`生成请求未返回 revision id: ${JSON.stringify(errors ?? generation, null, 2)}`);
+  }
+
+  if (immediateResponse.trim()) {
+    await options.onUpdate?.(immediateResponse, status || "COMPLETED");
+    return {
+      revisionId,
+      status: status || "COMPLETED",
+      response: immediateResponse,
+    };
+  }
+
+  for (let attempt = 1; attempt <= 60; attempt += 1) {
+    await delay(2_000);
+    const pollResult = await directGraphqlRequest(
+      options.cookies,
+      buildLatestRevisionPayload(options.projectGroupId),
+      {
+        fingerprint: options.fingerprint,
+        referer: options.targetUrl,
+      },
+    );
+
+    const latestRevision = asRecord(asRecord(asRecord(pollResult.data).projectGroupById).latestRevision);
+    const latestRevisionId = asString(latestRevision.id);
+    const latestStatus = asString(latestRevision.status);
+    const latestResponse = asString(latestRevision.response);
+
+    options.log?.(`[*] Cookie 直连轮询 revision ${attempt}/60: id=${latestRevisionId}, status=${latestStatus}`);
+
+    if (latestRevisionId !== revisionId) {
+      continue;
+    }
+
+    if (latestResponse.trim()) {
+      await options.onUpdate?.(latestResponse, latestStatus);
+    }
+
+    if (latestResponse.trim()) {
+      return {
+        revisionId,
+        status: latestStatus || "COMPLETED",
+        response: latestResponse,
+      };
+    }
+
+    if (["FAILED", "ERROR", "CANCELLED"].includes(latestStatus)) {
+      throw new Error(`生成失败: revision=${revisionId}, status=${latestStatus}`);
+    }
+  }
+
+  throw new Error(`等待生成结果超时: revision=${revisionId}, status=${status}`);
 }
 
 export async function runInteractiveLogin(options: {
@@ -863,6 +986,154 @@ async function graphqlRequest(
   } catch (error) {
     throw new Error(`GraphQL 返回了无效 JSON: ${formatError(error)} / ${truncate(probe.text, 500)}`);
   }
+}
+
+async function directGraphqlRequest(
+  cookies: readonly StoredCookie[],
+  payload: Record<string, unknown>,
+  options: { fingerprint?: StableFingerprint; referer?: string } = {},
+): Promise<Record<string, unknown>> {
+  const response = await fetch(new URL("/api/graphql", ANYTHING_BASE_URL), {
+    method: "POST",
+    headers: {
+      accept: "application/graphql-response+json,application/json;q=0.9",
+      "accept-language": options.fingerprint?.acceptLanguage ?? "zh-CN,zh;q=0.9,en;q=0.8",
+      "apollographql-client-name": "flux-web",
+      "content-type": "application/json",
+      cookie: buildCookieHeader(cookies),
+      origin: ANYTHING_BASE_URL,
+      referer: options.referer || ANYTHING_BASE_URL,
+      "user-agent": options.fingerprint?.userAgent ?? "Mozilla/5.0",
+    },
+    body: JSON.stringify(payload),
+  });
+  const text = await response.text();
+
+  if (response.status < 200 || response.status >= 300) {
+    const err = new Error(
+      `GraphQL HTTP ${response.status}: ${truncate(text, 300) ?? ""}`,
+    ) as Error & { status?: number; retryAfter?: string | null };
+    err.status = response.status;
+    err.retryAfter = response.headers.get("retry-after");
+    throw err;
+  }
+
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`GraphQL 返回了无效 JSON: ${formatError(error)} / ${truncate(text, 500)}`);
+  }
+}
+
+function buildMePayload(): Record<string, unknown> {
+  return {
+    operationName: "Me",
+    variables: {},
+    extensions: { clientLibrary: { name: "@apollo/client", version: "4.1.6" } },
+    query: `query Me { me { id email displayName __typename } }`,
+  };
+}
+
+function buildProjectGroupsPayload(): Record<string, unknown> {
+  return {
+    operationName: "GetProjectGroups",
+    variables: {
+      organizationId: null,
+      input: { organizationId: null, orderBy: { field: "UPDATED_AT", direction: "DESC" } },
+    },
+    extensions: { clientLibrary: { name: "@apollo/client", version: "4.1.6" } },
+    query: `query GetProjectGroups($organizationId: ID, $input: ProjectGroupsInput!) {
+      projectGroups(input: $input) { edges { node { id name __typename } __typename } __typename }
+    }`,
+  };
+}
+
+function buildGenerateProjectGroupRevisionPayload(options: {
+  projectGroupId: string;
+  prompt: string;
+  resolvedModel: ReturnType<typeof resolveModel>;
+}): Record<string, unknown> {
+  return {
+    operationName: "GenerateProjectGroupRevisionFromChat",
+    variables: {
+      input: {
+        projectGroupId: options.projectGroupId,
+        content: wrapPromptForModel(options.prompt, options.resolvedModel),
+        viewingModuleId: null,
+        action: "AUTO_SELECT_CHAT",
+        useExtendedThinking: true,
+        preferredGenerationProvider: options.resolvedModel.preferredGenerationProvider,
+        threadId: null,
+      },
+    },
+    extensions: {
+      clientLibrary: {
+        name: "@apollo/client",
+        version: "4.1.6",
+      },
+    },
+    query: `
+mutation GenerateProjectGroupRevisionFromChat($input: GenerateProjectGroupRevisionFromChatInput!) {
+  generateProjectGroupRevisionFromChat(input: $input) {
+    success
+    projectGroupRevision {
+      id
+      response
+      status
+      createdAt
+      chat {
+        id
+        content
+        __typename
+      }
+      __typename
+    }
+    askForUserProfileInfo
+    errors {
+      kind
+      message
+      __typename
+    }
+    __typename
+  }
+}
+    `.trim(),
+  };
+}
+
+function buildLatestRevisionPayload(projectGroupId: string): Record<string, unknown> {
+  return {
+    operationName: "GetLatestRevisionForProxy",
+    variables: {
+      projectGroupId,
+    },
+    extensions: {
+      clientLibrary: {
+        name: "@apollo/client",
+        version: "4.1.6",
+      },
+    },
+    query: `
+query GetLatestRevisionForProxy($projectGroupId: ID!) {
+  projectGroupById(id: $projectGroupId) {
+    id
+    latestRevision {
+      id
+      response
+      status
+      createdAt
+      chat {
+        id
+        content
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+}
+    `.trim(),
+  };
 }
 
 function extractTextFromPayload(raw: string): string | null {

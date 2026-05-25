@@ -31,6 +31,10 @@ export interface ConsoleServerDeps {
     log: (m: string) => void;
     signal: AbortSignal;
   }): Promise<AccountSessionRecord>;
+  importCookieSession(args: {
+    cookies: unknown;
+    finalUrl?: string;
+  }): Promise<AccountSessionRecord>;
 }
 
 export class ConsoleServer {
@@ -86,7 +90,7 @@ export class ConsoleServer {
 
     if (pathname === "/api/accounts" && request.method === "GET") {
       const accounts = await this.deps.pool.listAccounts();
-      this.sendJson(response, 200, accounts);
+      this.sendJson(response, 200, accounts.map(serializeAccountForConsole));
       return;
     }
 
@@ -120,7 +124,23 @@ export class ConsoleServer {
     if (pathname === "/api/accounts/import" && request.method === "POST") {
       try {
         const imported = await this.deps.importArchive(request);
-        this.sendJson(response, 200, imported);
+        this.sendJson(response, 200, serializeAccountForConsole(imported));
+      } catch (error) {
+        this.sendJson(response, 400, { error: { message: (error as Error).message } });
+      }
+      return;
+    }
+
+    if (pathname === "/api/accounts/cookies" && request.method === "POST") {
+      try {
+        const body = await readJsonBody(request);
+        const payload = (body ?? {}) as { cookies?: unknown; finalUrl?: unknown };
+        const imported = await this.deps.importCookieSession({
+          cookies: payload.cookies ?? body,
+          finalUrl: typeof payload.finalUrl === "string" ? payload.finalUrl : undefined,
+        });
+        await this.deps.pool.addPreparedSession(imported);
+        this.sendJson(response, 200, serializeAccountForConsole(imported));
       } catch (error) {
         this.sendJson(response, 400, { error: { message: (error as Error).message } });
       }
@@ -307,7 +327,7 @@ export class ConsoleServer {
       wsPort: this.loginState.wsPort,
       status: this.loginState.status,
       error: this.loginState.error,
-      session: this.loginState.session,
+      session: this.loginState.session ? serializeAccountForConsole(this.loginState.session) : undefined,
       startedAt: this.loginState.startedAt,
     };
   }
@@ -329,6 +349,14 @@ function guessContentType(file: string): string {
 function isInsideRoot(root: string, file: string): boolean {
   const relative = path.relative(root, file);
   return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function serializeAccountForConsole(session: AccountSessionRecord): Record<string, unknown> {
+  const { cookies, ...safeSession } = session;
+  return {
+    ...safeSession,
+    cookieCount: cookies?.length ?? 0,
+  };
 }
 
 function parseCookie(raw: string | undefined): Record<string, string> {

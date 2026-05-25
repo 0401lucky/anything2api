@@ -36,6 +36,7 @@ function makeDeps(): import("../../src/console/server.js").ConsoleServerDeps {
       getStatus: () => ({ running: false }),
     } as any,
     loginInteractive: async () => ({}) as any,
+    importCookieSession: async () => ({}) as any,
   };
 }
 

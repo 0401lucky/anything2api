@@ -1,6 +1,6 @@
 import { AccountPool } from "./account-pool.js";
 import { startApiServer } from "./api-server.js";
-import { loginInteractive, summarizeSession, tryLoadSessionFromPath } from "./account.js";
+import { createSessionFromCookies, loginInteractive, summarizeSession, tryLoadSessionFromPath } from "./account.js";
 import { packAccount, unpackAccount } from "./auth/packager.js";
 import { formatError } from "./util/error.js";
 
@@ -66,6 +66,21 @@ async function main(): Promise<void> {
         const session = await tryLoadSessionFromPath(sessionPath);
         await pool.addPreparedSession(session);
         console.log(`已导入: ${session.email} → ${accountDir}`);
+        return;
+      }
+
+      if (sub === "import-cookies") {
+        const cookieFile = process.argv[4];
+        const finalUrl = process.argv[5];
+        if (!cookieFile) throw new Error("用法: accounts import-cookies <cookies.json> [finalUrl]");
+        const { readFile } = await import("node:fs/promises");
+        const session = await createSessionFromCookies({
+          cookies: await readFile(cookieFile, "utf8"),
+          finalUrl,
+          log: console.log,
+        });
+        await pool.addPreparedSession(session);
+        console.log(`已导入 Cookie 账号: ${session.email}`);
         return;
       }
 

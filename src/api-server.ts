@@ -6,11 +6,12 @@ import path from "node:path";
 
 import {
   closeBrowserSession,
+  generateProjectGroupRevisionViaCookies,
   generateProjectGroupRevisionViaGraphql,
   openBrowserSession,
   type BrowserSessionHandle,
 } from "./browser.js";
-import { loginInteractive, type AccountSessionRecord } from "./account.js";
+import { createSessionFromCookies, loginInteractive, type AccountSessionRecord } from "./account.js";
 import { AccountPool, type PoolAccountRecord } from "./account-pool.js";
 import { MetricsRegistry } from "./metrics.js";
 import { SUPPORTED_MODEL_IDS, resolveModel } from "./model-catalog.js";
@@ -158,6 +159,9 @@ export async function startApiServer(log: (message: string) => void = console.lo
         vnc: new VncSupervisor(),
         loginInteractive: async ({ display, log, signal }) => {
           return await loginInteractive({ display, log, signal, headless: false });
+        },
+        importCookieSession: async ({ cookies, finalUrl }) => {
+          return await createSessionFromCookies({ cookies, finalUrl, log });
         },
       },
     );
@@ -350,19 +354,31 @@ class AnythingProxyBackend {
   ): Promise<{ text: string; model: string; account: PoolAccountRecord }> {
     const startedAt = Date.now();
     try {
-      const browser = await this.ensureBrowser(account);
       const resolvedModel = resolveModel(model);
-      const result = await generateProjectGroupRevisionViaGraphql({
-        handle: browser,
-        targetUrl: account.finalUrl || ANYTHING_BASE_URL,
-        projectGroupId: account.projectGroupId,
-        prompt,
-        preferredModel: resolvedModel.canonical,
-        log: this.log,
-        onUpdate: async (rawText, status) => {
-          await onUpdate?.(rawText, status, resolvedModel.canonical, account);
-        },
-      });
+      const result = account.cookies?.length
+        ? await generateProjectGroupRevisionViaCookies({
+            cookies: account.cookies,
+            fingerprint: account.fingerprint,
+            targetUrl: account.finalUrl || ANYTHING_BASE_URL,
+            projectGroupId: account.projectGroupId,
+            prompt,
+            preferredModel: resolvedModel.canonical,
+            log: this.log,
+            onUpdate: async (rawText, status) => {
+              await onUpdate?.(rawText, status, resolvedModel.canonical, account);
+            },
+          })
+        : await generateProjectGroupRevisionViaGraphql({
+            handle: await this.ensureBrowser(account),
+            targetUrl: account.finalUrl || ANYTHING_BASE_URL,
+            projectGroupId: account.projectGroupId,
+            prompt,
+            preferredModel: resolvedModel.canonical,
+            log: this.log,
+            onUpdate: async (rawText, status) => {
+              await onUpdate?.(rawText, status, resolvedModel.canonical, account);
+            },
+          });
 
       await persistTrace({
         session: account,
@@ -1335,7 +1351,12 @@ async function persistTrace(payload: {
 }): Promise<void> {
   await mkdir(TRACE_DIR, { recursive: true });
   const fileName = `${Date.now()}-${payload.session.accountId}.json`;
-  await writeFile(path.join(TRACE_DIR, fileName), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const { cookies, ...safeSession } = payload.session;
+  await writeFile(
+    path.join(TRACE_DIR, fileName),
+    `${JSON.stringify({ ...payload, session: { ...safeSession, cookieCount: cookies?.length ?? 0 } }, null, 2)}\n`,
+    "utf8",
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

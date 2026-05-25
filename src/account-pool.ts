@@ -186,13 +186,23 @@ export class AccountPool {
 
       const existing = state.accounts.find((account) => account.accountId === session.accountId);
       if (existing) {
+        const status = existing.status;
+        const strikeCount = existing.strikeCount;
+        const cooldownUntil = existing.cooldownUntil;
+        const lastUsedAt = existing.lastUsedAt;
+        const consecutiveUses = existing.consecutiveUses ?? 0;
+        Object.assign(existing, session);
         if (existing.status !== "deleted") {
           existing.status = "active";
           existing.cooldownUntil = null;
+        } else {
+          existing.status = status;
+          existing.cooldownUntil = cooldownUntil;
         }
+        existing.strikeCount = strikeCount;
         existing.lastError = null;
-        existing.lastUsedAt = null;
-        existing.consecutiveUses ??= 0;
+        existing.lastUsedAt = lastUsedAt;
+        existing.consecutiveUses = consecutiveUses;
         state.updatedAt = formatLocalTimestamp(new Date());
         await this.saveState(state);
         return existing;

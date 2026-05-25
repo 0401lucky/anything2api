@@ -198,6 +198,37 @@ $("#cancel-login-btn").addEventListener("click", async () => {
 });
 
 $("#import-btn").addEventListener("click", () => $("#import-file").click());
+$("#cookie-import-btn").addEventListener("click", openCookieModal);
+$("#cookie-modal-close").addEventListener("click", closeCookieModal);
+$("#cookie-cancel-btn").addEventListener("click", closeCookieModal);
+$("#cookie-modal").addEventListener("click", (event) => {
+  if (event.target === $("#cookie-modal")) closeCookieModal();
+});
+
+$("#cookie-submit-btn").addEventListener("click", async () => {
+  const button = $("#cookie-submit-btn");
+  const cookies = $("#cookie-json").value.trim();
+  const finalUrl = $("#cookie-final-url").value.trim();
+  if (!cookies) {
+    toast("Cookie 内容为空", true);
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    const session = await api("POST", "/api/accounts/cookies", {
+      cookies,
+      finalUrl,
+    });
+    toast(`已导入 ${session.email || "账号"}`);
+    closeCookieModal();
+    await refreshAll();
+  } catch (error) {
+    toast(`Cookie 导入失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("#import-file").addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
@@ -222,6 +253,16 @@ $("#import-file").addEventListener("change", async (event) => {
 
 function openVnc(sessionId) {
   window.open(`/admin/vnc.html?session=${encodeURIComponent(sessionId)}`, "_blank", "width=1320,height=900");
+}
+
+function openCookieModal() {
+  $("#cookie-modal").hidden = false;
+  $("#cookie-json").focus();
+}
+
+function closeCookieModal() {
+  $("#cookie-modal").hidden = true;
+  $("#cookie-json").value = "";
 }
 
 function setService(text, tone) {

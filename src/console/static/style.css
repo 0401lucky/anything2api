@@ -184,6 +184,8 @@ select {
 
 select,
 input[type="search"],
+input[type="url"],
+textarea,
 .login input {
   background: var(--panel-strong);
   border: 1px solid var(--line);
@@ -195,6 +197,14 @@ input[type="search"],
 
 input[type="search"] {
   width: 220px;
+}
+
+textarea {
+  line-height: 1.45;
+  min-height: 180px;
+  padding: 12px;
+  resize: vertical;
+  width: 100%;
 }
 
 .table-wrap {
@@ -357,6 +367,48 @@ th {
 
 .toast.danger {
   background: var(--danger);
+}
+
+.modal-backdrop {
+  align-items: center;
+  background: rgba(24, 33, 28, 0.38);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 30;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  max-width: 720px;
+  padding: 20px;
+  width: min(720px, 100%);
+}
+
+.field {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0;
+}
+
+.field span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+  margin-top: 14px;
 }
 
 .login {
