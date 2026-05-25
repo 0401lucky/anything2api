@@ -1,0 +1,12 @@
+body { font-family: system-ui, sans-serif; margin: 0; background: #f6f7fb; color: #111; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; background: #fff; border-bottom: 1px solid #e5e7eb; }
+main { padding: 24px; display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
+.row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+table { width: 100%; border-collapse: collapse; background: #fff; }
+th, td { padding: 8px 12px; border-bottom: 1px solid #e5e7eb; font-size: 14px; text-align: left; }
+button { padding: 6px 12px; border: 1px solid #c0c4cc; background: #fff; cursor: pointer; border-radius: 6px; }
+button:hover { background: #f3f4f6; }
+.login { max-width: 320px; margin: 80px auto; padding: 32px; background: #fff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); }
+.login input { width: 100%; padding: 8px 12px; margin: 4px 0; border: 1px solid #c0c4cc; border-radius: 6px; }
+.login button { width: 100%; margin-top: 12px; padding: 8px; background: #2563eb; color: #fff; border: 0; }
+pre { background: #fff; padding: 12px; border-radius: 8px; max-height: 320px; overflow: auto; }

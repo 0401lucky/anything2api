@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>anything2api admin</title>
+<link rel="stylesheet" href="/admin/style.css" />
+</head>
+<body>
+<main class="login">
+  <h1>控制台登录</h1>
+  <form id="login-form">
+    <input type="text" name="username" placeholder="用户名（如开启）" />
+    <input type="password" name="password" placeholder="密码" required />
+    <button type="submit">登录</button>
+    <p id="err"></p>
+  </form>
+</main>
+<script>
+document.getElementById("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  const response = await fetch("/admin/api/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: form.get("username") || undefined, password: form.get("password") }),
+  });
+  if (response.ok) {
+    location.href = "/admin/";
+  } else {
+    document.getElementById("err").textContent = "登录失败";
+  }
+});
+</script>
+</body>
+</html>

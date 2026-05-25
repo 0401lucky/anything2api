@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('src/console/static','dist/src/console/static',{recursive:true})\"",
     "start": "node dist/src/cli.js serve",
     "serve": "node dist/src/cli.js serve",
     "login": "node dist/src/cli.js login",

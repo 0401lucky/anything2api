@@ -37,6 +37,7 @@ import {
   type ParsedToolCall,
 } from "./tool-calls.js";
 import { checkApiKey, parseApiKeys } from "./auth/api-key.js";
+import { ConsoleServer } from "./console/server.js";
 import { UsageTracker } from "./usage/tracker.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
@@ -57,6 +58,22 @@ const IMMEDIATE_SWITCH_STATUS_CODES = new Set(
 const ACCOUNT_COOLDOWN_HOURS = Number.parseInt(process.env.ACCOUNT_COOLDOWN_HOURS ?? "12", 10);
 const STREAMING_MODE_DEFAULT: "real" | "fake" =
   (process.env.STREAMING_MODE ?? "real").toLowerCase() === "fake" ? "fake" : "real";
+
+const CONSOLE_PASSWORD = process.env.WEB_CONSOLE_PASSWORD;
+const CONSOLE_USERNAME = process.env.WEB_CONSOLE_USERNAME;
+const CONSOLE_SESSION_TTL_HOURS = Number.parseInt(process.env.CONSOLE_SESSION_TTL_HOURS ?? "24", 10);
+const RATE_LIMIT_MAX_ATTEMPTS = Number.parseInt(process.env.RATE_LIMIT_MAX_ATTEMPTS ?? "5", 10);
+const RATE_LIMIT_WINDOW_MINUTES = Number.parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES ?? "15", 10);
+
+const consoleServer = CONSOLE_PASSWORD
+  ? new ConsoleServer({
+      password: CONSOLE_PASSWORD,
+      username: CONSOLE_USERNAME,
+      sessionTtlMs: CONSOLE_SESSION_TTL_HOURS * 3600_000,
+      rateLimitMax: RATE_LIMIT_MAX_ATTEMPTS,
+      rateLimitWindowMs: RATE_LIMIT_WINDOW_MINUTES * 60_000,
+    })
+  : null;
 interface OpenAIChatCompletionRequest {
   model?: string;
   messages?: Array<{ role?: string; content?: unknown }>;
@@ -378,7 +395,11 @@ async function routeRequest(
   }
 
   if (url.pathname.startsWith("/admin/")) {
-    sendJson(response, 503, { error: { message: "admin console not enabled in this build" } });
+    if (!consoleServer) {
+      sendJson(response, 503, { error: { message: "console disabled (WEB_CONSOLE_PASSWORD not set)" } });
+      return;
+    }
+    await consoleServer.handle(request, response, url);
     return;
   }
 

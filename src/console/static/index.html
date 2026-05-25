@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>anything2api</title>
+<link rel="stylesheet" href="/admin/style.css" />
+</head>
+<body>
+<header>
+  <h1>anything2api 控制台</h1>
+  <button id="logout-btn">退出</button>
+</header>
+<main>
+  <section id="accounts-section">
+    <div class="row">
+      <h2>账号</h2>
+      <button id="add-account-btn">添加账号</button>
+      <button id="import-btn">导入 tar.gz</button>
+      <input type="file" id="import-file" accept=".gz,.tgz" hidden />
+    </div>
+    <table id="accounts-table">
+      <thead>
+        <tr>
+          <th>Email</th><th>状态</th><th>strikes</th><th>cooldown</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+  <section id="usage-section">
+    <h2>使用统计</h2>
+    <pre id="usage-output">加载中...</pre>
+  </section>
+</main>
+<script src="/admin/app.js"></script>
+</body>
+</html>
