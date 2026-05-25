@@ -2,7 +2,7 @@ import { AccountPool } from "./account-pool.js";
 import { startApiServer } from "./api-server.js";
 import { loadLatestSession, registerAndLogin, summarizeSession } from "./account.js";
 import { closeBrowserSession, openBrowserSession, runPromptInBrowser } from "./browser.js";
-import { formatError } from "./register.js";
+import { formatError } from "./util/error.js";
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "serve";

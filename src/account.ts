@@ -6,8 +6,6 @@ import { launchAndLoginWithMagicLink } from "./browser.js";
 import { loadOrCreateFingerprint, type StableFingerprint } from "./fingerprint.js";
 import {
   createTemporaryMailbox,
-  formatError,
-  formatLocalTimestamp,
   generateEmailPrefix,
   pollMagicLoginEmail,
   signupAnything,
@@ -15,6 +13,8 @@ import {
   type SignupResult,
   type TemporaryMailbox,
 } from "./register.js";
+import { formatError } from "./util/error.js";
+import { formatLocalTimestamp } from "./util/time.js";
 
 export interface AccountSessionRecord {
   version: number;

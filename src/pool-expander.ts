@@ -1,7 +1,7 @@
 import { Worker } from "node:worker_threads";
 
 import type { AccountPool } from "./account-pool.js";
-import { formatError } from "./register.js";
+import { formatError } from "./util/error.js";
 
 const HOT_POOL_TARGET = parsePositiveInteger(process.env.POOL_SIZE, 32);
 const MAX_POOL_SIZE = parsePositiveInteger(process.env.MAX_POOL_SIZE, 1024);

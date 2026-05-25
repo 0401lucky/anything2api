@@ -7,7 +7,7 @@ import type { Browser, Page } from "puppeteer";
 
 import { resolveModel } from "./model-catalog.js";
 import type { StableFingerprint } from "./fingerprint.js";
-import { formatError } from "./register.js";
+import { formatError } from "./util/error.js";
 
 const puppeteerExtra = puppeteerExtraModule as unknown as {
   use(plugin: unknown): void;

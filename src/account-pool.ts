@@ -2,7 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { registerAndLogin, type AccountSessionRecord } from "./account.js";
-import { formatError, formatLocalTimestamp } from "./register.js";
+import { formatError } from "./util/error.js";
+import { formatLocalTimestamp } from "./util/time.js";
 
 export type PoolAccountStatus = "active" | "cooldown" | "deleted";
 

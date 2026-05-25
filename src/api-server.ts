@@ -14,7 +14,7 @@ import { MetricsRegistry } from "./metrics.js";
 import { SUPPORTED_MODEL_IDS, resolveModel } from "./model-catalog.js";
 import { cleanAssistantOutput } from "./output-cleaning.js";
 import { BackgroundPoolExpander } from "./pool-expander.js";
-import { formatError } from "./register.js";
+import { formatError } from "./util/error.js";
 import {
   endSse,
   parseIncrementalOutput,

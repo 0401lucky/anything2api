@@ -1,7 +1,7 @@
 import { parentPort, workerData } from "node:worker_threads";
 
 import { registerAndLogin } from "./account.js";
-import { formatError } from "./register.js";
+import { formatError } from "./util/error.js";
 
 interface WorkerConfig {
   hotTarget: number;
