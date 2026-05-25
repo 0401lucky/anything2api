@@ -13,6 +13,7 @@ export interface PoolAccountRecord extends AccountSessionRecord {
   cooldownUntil: string | null;
   lastError: string | null;
   lastUsedAt: string | null;
+  consecutiveUses: number;
 }
 
 export interface AccountPoolState {
@@ -36,6 +37,7 @@ const POOL_STATE_PATH = path.join(DATA_DIR, "account-pool.json");
 const MAX_POOL_SIZE = parsePositiveInteger(process.env.MAX_POOL_SIZE, 1024);
 const ACCOUNT_COOLDOWN_HOURS = parsePositiveInteger(process.env.ACCOUNT_COOLDOWN_HOURS, 12);
 const ACCOUNT_MAX_STRIKES = parsePositiveInteger(process.env.ACCOUNT_MAX_STRIKES, 2);
+const SWITCH_ON_USES = parsePositiveInteger(process.env.SWITCH_ON_USES, 40);
 
 export class AccountPool {
   private queue: Promise<unknown> = Promise.resolve();
@@ -59,6 +61,7 @@ export class AccountPool {
       }
 
       const selected = candidates[0]!;
+      selected.consecutiveUses = (selected.consecutiveUses ?? 0) + 1;
       selected.lastUsedAt = formatLocalTimestamp(new Date());
       state.updatedAt = formatLocalTimestamp(new Date());
       await this.saveState(state);
@@ -80,6 +83,9 @@ export class AccountPool {
         account.status = "active";
         account.cooldownUntil = null;
       }
+      if (SWITCH_ON_USES > 0 && (account.consecutiveUses ?? 0) >= SWITCH_ON_USES) {
+        account.consecutiveUses = 0;
+      }
       state.updatedAt = formatLocalTimestamp(new Date());
       await this.saveState(state);
     });
@@ -94,6 +100,7 @@ export class AccountPool {
       }
 
       account.strikeCount += 1;
+      account.consecutiveUses = 0;
       account.lastError = formatError(error);
       account.lastUsedAt = formatLocalTimestamp(new Date());
 
@@ -129,6 +136,7 @@ export class AccountPool {
       if (!account) return null;
       account.status = "active";
       account.strikeCount = 0;
+      account.consecutiveUses = 0;
       account.cooldownUntil = null;
       account.lastError = null;
       state.updatedAt = formatLocalTimestamp(new Date());
@@ -146,6 +154,7 @@ export class AccountPool {
       const state = await this.loadState();
       const account = state.accounts.find((item) => item.accountId === accountId);
       if (!account) return null;
+      account.consecutiveUses = 0;
       account.lastError = formatError(error);
       account.lastUsedAt = formatLocalTimestamp(new Date());
       account.status = "cooldown";
@@ -183,6 +192,7 @@ export class AccountPool {
         }
         existing.lastError = null;
         existing.lastUsedAt = null;
+        existing.consecutiveUses ??= 0;
         state.updatedAt = formatLocalTimestamp(new Date());
         await this.saveState(state);
         return existing;
@@ -202,6 +212,7 @@ export class AccountPool {
         cooldownUntil: null,
         lastError: null,
         lastUsedAt: null,
+        consecutiveUses: 0,
       };
       state.accounts.push(record);
       compactState(state);

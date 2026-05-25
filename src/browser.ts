@@ -522,7 +522,7 @@ async function graphqlRequest(
   page: Page,
   payload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const responseText = await page.evaluate(async (requestPayload) => {
+  const probe = await page.evaluate(async (requestPayload) => {
     const response = await fetch("/api/graphql", {
       method: "POST",
       credentials: "include",
@@ -533,13 +533,27 @@ async function graphqlRequest(
       },
       body: JSON.stringify(requestPayload),
     });
-    return response.text();
+    const text = await response.text();
+    return {
+      status: response.status,
+      retryAfter: response.headers.get("retry-after"),
+      text,
+    };
   }, payload);
 
+  if (probe.status < 200 || probe.status >= 300) {
+    const err = new Error(
+      `GraphQL HTTP ${probe.status}: ${truncate(probe.text, 300) ?? ""}`,
+    ) as Error & { status?: number; retryAfter?: string | null };
+    err.status = probe.status;
+    err.retryAfter = probe.retryAfter;
+    throw err;
+  }
+
   try {
-    return JSON.parse(responseText) as Record<string, unknown>;
+    return JSON.parse(probe.text) as Record<string, unknown>;
   } catch (error) {
-    throw new Error(`GraphQL 返回了无效 JSON: ${formatError(error)} / ${truncate(responseText, 500)}`);
+    throw new Error(`GraphQL 返回了无效 JSON: ${formatError(error)} / ${truncate(probe.text, 500)}`);
   }
 }
 

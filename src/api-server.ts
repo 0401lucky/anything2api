@@ -48,6 +48,13 @@ const METRICS_TOKEN = process.env.METRICS_TOKEN?.trim() || null;
 const USAGE_FILE = path.resolve(process.cwd(), process.env.DATA_DIR ?? "data", "usage-stats.jsonl");
 const USAGE_MAX_BYTES = Number.parseInt(process.env.USAGE_MAX_BYTES ?? `${50 * 1024 * 1024}`, 10);
 const USAGE_ENABLED = (process.env.ENABLE_USAGE_STATS ?? "true").toLowerCase() !== "false";
+const IMMEDIATE_SWITCH_STATUS_CODES = new Set(
+  (process.env.IMMEDIATE_SWITCH_STATUS_CODES ?? "429,403,401")
+    .split(",")
+    .map((item) => Number.parseInt(item.trim(), 10))
+    .filter((item) => Number.isFinite(item) && item > 0),
+);
+const ACCOUNT_COOLDOWN_HOURS = Number.parseInt(process.env.ACCOUNT_COOLDOWN_HOURS ?? "12", 10);
 interface OpenAIChatCompletionRequest {
   model?: string;
   messages?: Array<{ role?: string; content?: unknown }>;
@@ -158,7 +165,16 @@ class AnythingProxyBackend {
       } catch (error) {
         lastError = error;
         this.log(`[-] 账号执行失败: ${account.email} / ${formatError(error)}`);
-        await this.pool.markFailure(account.accountId, error);
+
+        const status = (error as { status?: number } | undefined)?.status;
+        if (typeof status === "number" && IMMEDIATE_SWITCH_STATUS_CODES.has(status)) {
+          const retryAfter = (error as { retryAfter?: string | null }).retryAfter ?? null;
+          const cooldownHours = computeCooldownHours(retryAfter, ACCOUNT_COOLDOWN_HOURS);
+          await this.pool.markImmediateCooldown(account.accountId, error, cooldownHours);
+        } else {
+          await this.pool.markFailure(account.accountId, error);
+        }
+
         this.metrics.recordFailover();
         await this.disposeBrowser(account.accountId);
         this.refreshPoolMetrics();
@@ -191,7 +207,16 @@ class AnythingProxyBackend {
       } catch (error) {
         lastError = error;
         this.log(`[-] 账号流式执行失败: ${account.email} / ${formatError(error)}`);
-        await this.pool.markFailure(account.accountId, error);
+
+        const status = (error as { status?: number } | undefined)?.status;
+        if (typeof status === "number" && IMMEDIATE_SWITCH_STATUS_CODES.has(status)) {
+          const retryAfter = (error as { retryAfter?: string | null }).retryAfter ?? null;
+          const cooldownHours = computeCooldownHours(retryAfter, ACCOUNT_COOLDOWN_HOURS);
+          await this.pool.markImmediateCooldown(account.accountId, error, cooldownHours);
+        } else {
+          await this.pool.markFailure(account.accountId, error);
+        }
+
         this.metrics.recordFailover();
         await this.disposeBrowser(account.accountId);
         this.refreshPoolMetrics();
@@ -1139,6 +1164,15 @@ function setCorsHeaders(response: ServerResponse<IncomingMessage>): void {
   response.setHeader("access-control-allow-origin", "*");
   response.setHeader("access-control-allow-headers", "authorization, content-type, x-api-key, anthropic-version");
   response.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+}
+
+function computeCooldownHours(retryAfter: string | null, fallbackHours: number): number {
+  if (!retryAfter) return fallbackHours;
+  const seconds = Number.parseInt(retryAfter, 10);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(fallbackHours, Math.max(1, Math.ceil(seconds / 3600)));
+  }
+  return fallbackHours;
 }
 
 async function persistTrace(payload: {
