@@ -2,8 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { closeBrowserSession, openBrowserSession, runInteractiveLogin } from "./browser.js";
 import type { StableFingerprint } from "./fingerprint.js";
+import { loadOrCreateFingerprint } from "./fingerprint.js";
 import { formatError } from "./util/error.js";
+import { formatLocalTimestamp } from "./util/time.js";
 
 export interface AccountSessionRecord {
   version: number;
@@ -67,4 +70,69 @@ export async function tryLoadSessionFromPath(sessionPath: string): Promise<Accou
 
 export function describeSessionError(error: unknown): string {
   return formatError(error);
+}
+
+export interface LoginInteractiveOptions {
+  display?: string;
+  headless?: boolean;
+  log?: (message: string) => void;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export async function loginInteractive(
+  options: LoginInteractiveOptions = {},
+): Promise<AccountSessionRecord> {
+  const log = options.log ?? console.log;
+
+  // Stage browser in a temporary "pending" dir; move to canonical account dir after we know the email.
+  const tempDir = path.join(DATA_DIR, "pending", `login-${Date.now()}`);
+  const tempFingerprint = await loadOrCreateFingerprint(tempDir, `pending-${Date.now()}`);
+  const handle = await openBrowserSession(tempDir, tempFingerprint, {
+    headless: options.headless ?? false,
+    display: options.display,
+  });
+
+  try {
+    log(`[*] 等待 Google 登录 anything.com ...`);
+    const result = await runInteractiveLogin({
+      handle,
+      log,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+    });
+
+    const targetDir = getAccountDir(result.email);
+    await mkdir(targetDir, { recursive: true });
+
+    // Move user-data + fingerprint from pending → canonical dir.
+    const { rename } = await import("node:fs/promises");
+    await rename(path.join(tempDir, "user-data"), path.join(targetDir, "user-data"));
+    await rename(path.join(tempDir, "fingerprint.json"), path.join(targetDir, "fingerprint.json"));
+
+    const finalFingerprint = await loadOrCreateFingerprint(targetDir, result.email);
+
+    const session: AccountSessionRecord = {
+      version: 1,
+      accountId: createAccountId(result.email),
+      accountDir: targetDir,
+      email: result.email,
+      mailboxKey: "",
+      userId: result.userId,
+      projectGroupId: result.projectGroupId,
+      finalUrl: result.finalUrl,
+      title: result.title,
+      createdAt: formatLocalTimestamp(new Date()),
+      fingerprint: finalFingerprint,
+    };
+
+    await writeFile(path.join(targetDir, "session.json"), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+    await saveLatestSession(session);
+    log(`[+] 账号会话已保存: ${path.join(targetDir, "session.json")}`);
+    return session;
+  } finally {
+    await closeBrowserSession(handle);
+    const { rm } = await import("node:fs/promises");
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
