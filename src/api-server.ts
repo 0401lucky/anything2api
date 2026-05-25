@@ -37,6 +37,7 @@ import {
   type ParsedToolCall,
 } from "./tool-calls.js";
 import { checkApiKey, parseApiKeys } from "./auth/api-key.js";
+import { UsageTracker } from "./usage/tracker.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const ANYTHING_BASE_URL = process.env.ANYTHING_BASE_URL ?? "https://www.anything.com";
@@ -44,6 +45,9 @@ const TRACE_DIR = path.resolve(process.cwd(), process.env.TRACE_DIR ?? "data/tra
 const MAX_FAILOVER_ATTEMPTS = Number.parseInt(process.env.MAX_FAILOVER_ATTEMPTS ?? "4", 10);
 const API_KEYS = parseApiKeys(process.env.API_KEYS);
 const METRICS_TOKEN = process.env.METRICS_TOKEN?.trim() || null;
+const USAGE_FILE = path.resolve(process.cwd(), process.env.DATA_DIR ?? "data", "usage-stats.jsonl");
+const USAGE_MAX_BYTES = Number.parseInt(process.env.USAGE_MAX_BYTES ?? `${50 * 1024 * 1024}`, 10);
+const USAGE_ENABLED = (process.env.ENABLE_USAGE_STATS ?? "true").toLowerCase() !== "false";
 interface OpenAIChatCompletionRequest {
   model?: string;
   messages?: Array<{ role?: string; content?: unknown }>;
@@ -89,6 +93,7 @@ export async function startApiServer(log: (message: string) => void = console.lo
     process.exit(1);
   }
   const backend = new AnythingProxyBackend(log);
+  await backend.maybeRotateUsage();
   await backend.refreshPoolMetrics();
   const server = createServer(async (request, response) => {
     const finishMetrics = backend.metrics.beginHttpRequest();
@@ -126,9 +131,15 @@ class AnythingProxyBackend {
   private readonly browsers = new Map<string, BrowserSessionHandle>();
   private readonly busyAccountIds = new Set<string>();
   public readonly metrics = new MetricsRegistry();
+  private readonly usage: UsageTracker | null;
 
   public constructor(private readonly log: (message: string) => void) {
     this.pool = new AccountPool(log);
+    this.usage = USAGE_ENABLED ? new UsageTracker(USAGE_FILE, USAGE_MAX_BYTES) : null;
+  }
+
+  public async maybeRotateUsage(): Promise<void> {
+    if (this.usage) await this.usage.maybeRotate();
   }
 
   public async generate(prompt: string, model?: string): Promise<{ text: string; model: string; account: PoolAccountRecord }> {
@@ -199,34 +210,62 @@ class AnythingProxyBackend {
     model?: string,
     onUpdate?: (rawText: string, status: string, model: string, account: PoolAccountRecord) => Promise<void> | void,
   ): Promise<{ text: string; model: string; account: PoolAccountRecord }> {
-    const browser = await this.ensureBrowser(account);
-    const resolvedModel = resolveModel(model);
-    const result = await generateProjectGroupRevisionViaGraphql({
-      handle: browser,
-      targetUrl: account.finalUrl || ANYTHING_BASE_URL,
-      projectGroupId: account.projectGroupId,
-      prompt,
-      preferredModel: resolvedModel.canonical,
-      log: this.log,
-      onUpdate: async (rawText, status) => {
-        await onUpdate?.(rawText, status, resolvedModel.canonical, account);
-      },
-    });
+    const startedAt = Date.now();
+    try {
+      const browser = await this.ensureBrowser(account);
+      const resolvedModel = resolveModel(model);
+      const result = await generateProjectGroupRevisionViaGraphql({
+        handle: browser,
+        targetUrl: account.finalUrl || ANYTHING_BASE_URL,
+        projectGroupId: account.projectGroupId,
+        prompt,
+        preferredModel: resolvedModel.canonical,
+        log: this.log,
+        onUpdate: async (rawText, status) => {
+          await onUpdate?.(rawText, status, resolvedModel.canonical, account);
+        },
+      });
 
-    await persistTrace({
-      session: account,
-      prompt,
-      model: resolvedModel.canonical,
-      result,
-    });
+      await persistTrace({
+        session: account,
+        prompt,
+        model: resolvedModel.canonical,
+        result,
+      });
 
-    this.metrics.recordGeneration(prompt, result.response.trim());
+      this.metrics.recordGeneration(prompt, result.response.trim());
 
-    return {
-      text: result.response.trim(),
-      model: resolvedModel.canonical,
-      account,
-    };
+      const finalText = result.response.trim();
+      await this.usage?.record({
+        ts: new Date(),
+        accountId: account.accountId,
+        model: resolvedModel.canonical,
+        route: "/v1",
+        promptChars: prompt.length,
+        completionChars: finalText.length,
+        status: "ok",
+        latencyMs: Date.now() - startedAt,
+      });
+
+      return {
+        text: finalText,
+        model: resolvedModel.canonical,
+        account,
+      };
+    } catch (error) {
+      await this.usage?.record({
+        ts: new Date(),
+        accountId: account.accountId,
+        model: model ?? "unknown",
+        route: "/v1",
+        promptChars: prompt.length,
+        completionChars: 0,
+        status: "error",
+        errorKind: error instanceof Error ? error.constructor.name : "Unknown",
+        latencyMs: Date.now() - startedAt,
+      });
+      throw error;
+    }
   }
 
   private async ensureBrowser(account: PoolAccountRecord): Promise<BrowserSessionHandle> {
