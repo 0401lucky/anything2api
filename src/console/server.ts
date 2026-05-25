@@ -208,19 +208,12 @@ export class ConsoleServer {
 
     if (pathname.startsWith("/novnc/")) {
       const sub = pathname.slice("/novnc/".length);
-      const novncRoot = process.env.NOVNC_DIR ?? "/usr/share/novnc";
-      const file = path.resolve(novncRoot, sub);
-      if (!file.startsWith(path.resolve(novncRoot))) {
-        this.sendJson(response, 403, { error: { message: "forbidden" } });
-        return;
-      }
-      try {
-        await stat(file);
-        response.writeHead(200, { "content-type": guessContentType(file) });
-        createReadStream(file).pipe(response);
-      } catch {
-        this.sendJson(response, 404, { error: { message: "novnc asset not found" } });
-      }
+      const servedBundled = await this.tryServeFromRoot(response, path.join(STATIC_ROOT, "novnc"), sub);
+      if (servedBundled) return;
+      const systemNovncRoot = process.env.NOVNC_DIR ?? "/usr/share/novnc";
+      const servedSystem = await this.tryServeFromRoot(response, systemNovncRoot, sub);
+      if (servedSystem) return;
+      this.sendJson(response, 404, { error: { message: "novnc asset not found" } });
       return;
     }
 
@@ -243,6 +236,25 @@ export class ConsoleServer {
     }
     response.writeHead(200, { "content-type": guessContentType(file) });
     createReadStream(fullPath).pipe(response);
+  }
+
+  private async tryServeFromRoot(response: ServerResponse, root: string, subPath: string): Promise<boolean> {
+    const resolvedRoot = path.resolve(root);
+    const file = path.resolve(resolvedRoot, subPath);
+    if (!isInsideRoot(resolvedRoot, file)) return false;
+
+    try {
+      await stat(file);
+    } catch {
+      return false;
+    }
+
+    response.writeHead(200, {
+      "content-type": guessContentType(file),
+      "cache-control": "public, max-age=31536000, immutable",
+    });
+    createReadStream(file).pipe(response);
+    return true;
   }
 
   private async handleLogin(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -310,7 +322,13 @@ function guessContentType(file: string): string {
   if (file.endsWith(".html")) return "text/html; charset=utf-8";
   if (file.endsWith(".js")) return "application/javascript; charset=utf-8";
   if (file.endsWith(".css")) return "text/css; charset=utf-8";
+  if (file.endsWith(".json")) return "application/json; charset=utf-8";
   return "application/octet-stream";
+}
+
+function isInsideRoot(root: string, file: string): boolean {
+  const relative = path.relative(root, file);
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function parseCookie(raw: string | undefined): Record<string, string> {

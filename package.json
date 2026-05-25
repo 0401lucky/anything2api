@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('src/console/static','dist/src/console/static',{recursive:true})\"",
+    "build": "tsc -p tsconfig.json && node -e \"const fs=require('fs');fs.cpSync('src/console/static','dist/src/console/static',{recursive:true});fs.cpSync('node_modules/@novnc/novnc/core','dist/src/console/static/novnc/core',{recursive:true});fs.cpSync('node_modules/@novnc/novnc/vendor','dist/src/console/static/novnc/vendor',{recursive:true});\"",
     "prestart": "npm run build",
     "start": "node dist/src/cli.js serve",
     "serve": "node dist/src/cli.js serve",
@@ -24,6 +24,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@novnc/novnc": "^1.7.0",
     "puppeteer": "^24.40.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",

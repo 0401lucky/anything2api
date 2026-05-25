@@ -61,14 +61,29 @@ function setConnected(value) {
 
 async function loadRfb() {
   try {
-    return (await import("/admin/novnc/core/rfb.js")).default;
+    return (await withTimeout(import("/admin/novnc/core/rfb.js"), 10_000, "内置 noVNC 客户端加载超时")).default;
   } catch (localError) {
     try {
-      return (await import("https://esm.sh/@novnc/novnc@1.4.0/lib/rfb.js")).default;
+      setStatus("正在加载备用 VNC 客户端", "内置客户端暂时不可用，正在尝试备用来源。");
+      return (await withTimeout(
+        import("https://esm.sh/@novnc/novnc@1.7.0/core/rfb.js"),
+        10_000,
+        "备用 noVNC 客户端加载超时",
+      )).default;
     } catch (remoteError) {
       throw new Error(`本地 noVNC 加载失败：${localError.message || localError}\nCDN 加载失败：${remoteError.message || remoteError}`);
     }
   }
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 async function start() {
