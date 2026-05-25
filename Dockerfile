@@ -1,7 +1,8 @@
 # ===== Build stage =====
 FROM node:20-bookworm-slim AS builder
 
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_SKIP_DOWNLOAD=true
 
 WORKDIR /app
 COPY package*.json tsconfig.json ./
@@ -24,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     NOVNC_DIR=/usr/share/novnc \
     NODE_ENV=production \

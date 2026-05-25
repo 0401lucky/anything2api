@@ -1,9 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
-
-import { WebSocketServer, WebSocket } from "ws";
 
 import {
   closeBrowserSession,
@@ -111,9 +110,11 @@ interface ToolAwareGenerationResult {
 }
 
 export async function startApiServer(log: (message: string) => void = console.log): Promise<void> {
+  if (!Number.isInteger(PORT) || PORT <= 0 || PORT > 65535) {
+    throw new Error(`PORT 配置无效: ${process.env.PORT ?? "8787"}`);
+  }
   if (API_KEYS.length === 0) {
-    log("[FATAL] API_KEYS 环境变量未设置；启动被拒。请配置 API_KEYS=key1,key2 后再启动。");
-    process.exit(1);
+    log("[!] API_KEYS 环境变量未设置；/v1 API 将返回 503，管理控制台仍可启动。");
   }
   const backend = new AnythingProxyBackend(log);
   await backend.maybeRotateUsage();
@@ -187,8 +188,6 @@ export async function startApiServer(log: (message: string) => void = console.lo
     }
   });
 
-  const wsServer = new WebSocketServer({ noServer: true });
-
   server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
     if (!url.pathname.startsWith("/admin/vnc/")) {
@@ -197,24 +196,53 @@ export async function startApiServer(log: (message: string) => void = console.lo
     }
     const sessionToken = parseCookieHeader(request.headers.cookie)["a2a_console"];
     if (!consoleServer || !consoleServer.requireSessionByToken(sessionToken)) {
-      socket.destroy();
+      rejectUpgrade(socket, 401, "Unauthorized");
       return;
     }
     const sessionId = url.pathname.split("/").pop();
     const loginStatus = consoleServer.getLoginStatus();
-    if (loginStatus?.vncSessionId !== sessionId) {
-      socket.destroy();
+    if (!sessionId || loginStatus?.vncSessionId !== sessionId) {
+      rejectUpgrade(socket, 404, "Not Found");
       return;
     }
 
-    wsServer.handleUpgrade(request, socket, head, (clientWs) => {
-      const upstreamWs = new WebSocket("ws://127.0.0.1:6080/websockify");
-      bridgeWebSockets(clientWs, upstreamWs);
+    const upstreamPort = loginStatus.wsPort ?? 6080;
+    const upstream = createConnection({ host: "127.0.0.1", port: upstreamPort });
+    let connectedToUpstream = false;
+    upstream.once("connect", () => {
+      connectedToUpstream = true;
+      upstream.write(buildVncUpgradeRequest(request, upstreamPort));
+      if (head.length > 0) upstream.write(head);
+      upstream.pipe(socket).pipe(upstream);
+    });
+    upstream.once("error", (error) => {
+      log(`[-] VNC WebSocket 反代失败: ${formatError(error)}`);
+      if (connectedToUpstream) {
+        socket.destroy();
+        return;
+      }
+      rejectUpgrade(socket, 502, "Bad Gateway");
+    });
+    socket.once("error", () => {
+      upstream.destroy();
     });
   });
 
-  server.listen(PORT, () => {
-    log(`[+] 2api 代理已启动: http://127.0.0.1:${PORT}`);
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      log(`[+] 2api 代理已启动: http://127.0.0.1:${PORT}`);
+      resolve();
+    };
+    server.once("error", onError);
+    server.listen(PORT, onListening);
+  });
+  server.on("error", (error) => {
+    log(`[-] HTTP 服务错误: ${formatError(error)}`);
   });
 }
 
@@ -470,6 +498,15 @@ async function routeRequest(
   }
 
   if (url.pathname.startsWith("/v1/")) {
+    if (API_KEYS.length === 0) {
+      sendJson(response, 503, {
+        error: {
+          message: "API_KEYS 环境变量未设置，API 路由暂不可用",
+          type: "server_not_configured",
+        },
+      });
+      return;
+    }
     if (!checkApiKey(request, API_KEYS)) {
       sendJson(response, 401, {
         error: { message: "Invalid or missing API key", type: "authentication_error" },
@@ -1453,19 +1490,6 @@ async function pipeStreamToFile(input: NodeJS.ReadableStream, target: string): P
   });
 }
 
-function bridgeWebSockets(a: WebSocket, b: WebSocket): void {
-  a.on("message", (data) => {
-    if (b.readyState === WebSocket.OPEN) b.send(data);
-  });
-  b.on("message", (data) => {
-    if (a.readyState === WebSocket.OPEN) a.send(data);
-  });
-  a.on("close", () => b.close());
-  b.on("close", () => a.close());
-  a.on("error", () => b.close());
-  b.on("error", () => a.close());
-}
-
 function parseCookieHeader(raw: string | undefined): Record<string, string> {
   const result: Record<string, string> = {};
   if (!raw) return result;
@@ -1475,4 +1499,38 @@ function parseCookieHeader(raw: string | undefined): Record<string, string> {
     result[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
   }
   return result;
+}
+
+function buildVncUpgradeRequest(request: IncomingMessage, upstreamPort: number): string {
+  const headers = [
+    "GET /websockify HTTP/1.1",
+    `Host: 127.0.0.1:${upstreamPort}`,
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+  ];
+
+  appendHeader(headers, "Sec-WebSocket-Key", request.headers["sec-websocket-key"]);
+  appendHeader(headers, "Sec-WebSocket-Version", request.headers["sec-websocket-version"]);
+  appendHeader(headers, "Sec-WebSocket-Protocol", request.headers["sec-websocket-protocol"]);
+  appendHeader(headers, "Sec-WebSocket-Extensions", request.headers["sec-websocket-extensions"]);
+  appendHeader(headers, "Origin", request.headers.origin);
+
+  return `${headers.join("\r\n")}\r\n\r\n`;
+}
+
+function appendHeader(headers: string[], name: string, value: string | string[] | undefined): void {
+  if (Array.isArray(value)) {
+    if (value.length > 0) headers.push(`${name}: ${value.join(", ")}`);
+    return;
+  }
+  if (value) headers.push(`${name}: ${value}`);
+}
+
+function rejectUpgrade(socket: NodeJS.WritableStream & { destroy(): void }, status: number, message: string): void {
+  try {
+    socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
+  } catch {
+    // ignore
+  }
+  socket.destroy();
 }

@@ -2,36 +2,127 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<title>anything2api</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>anything2api 控制台</title>
 <link rel="stylesheet" href="/admin/style.css" />
 </head>
-<body>
-<header>
-  <h1>anything2api 控制台</h1>
-  <button id="logout-btn">退出</button>
+<body class="console-shell">
+<header class="topbar">
+  <div>
+    <p class="eyebrow">anything2api</p>
+    <h1>控制台</h1>
+  </div>
+  <div class="topbar-actions">
+    <span id="service-pill" class="pill tone-muted">检查中</span>
+    <button id="refresh-btn" class="button ghost" type="button">刷新</button>
+    <button id="logout-btn" class="button ghost" type="button">退出</button>
+  </div>
 </header>
-<main>
-  <section id="accounts-section">
-    <div class="row">
-      <h2>账号</h2>
-      <button id="add-account-btn">添加账号</button>
-      <button id="import-btn">导入 tar.gz</button>
-      <input type="file" id="import-file" accept=".gz,.tgz" hidden />
+
+<main class="dashboard">
+  <section class="overview-grid" aria-label="总览">
+    <article class="metric">
+      <span>账号总数</span>
+      <strong id="metric-total">0</strong>
+    </article>
+    <article class="metric">
+      <span>活跃账号</span>
+      <strong id="metric-active">0</strong>
+    </article>
+    <article class="metric">
+      <span>冷却账号</span>
+      <strong id="metric-cooldown">0</strong>
+    </article>
+    <article class="metric">
+      <span>请求总数</span>
+      <strong id="metric-requests">0</strong>
+    </article>
+  </section>
+
+  <section class="panel accounts-panel">
+    <div class="panel-head">
+      <div>
+        <p class="eyebrow">accounts</p>
+        <h2>账号池</h2>
+      </div>
+      <div class="toolbar">
+        <select id="status-filter" aria-label="状态筛选">
+          <option value="all">全部</option>
+          <option value="active">活跃</option>
+          <option value="cooldown">冷却</option>
+          <option value="deleted">已删除</option>
+        </select>
+        <input id="account-search" type="search" placeholder="搜索邮箱或账号 ID" />
+        <button id="add-account-btn" class="button primary" type="button">添加账号</button>
+        <button id="import-btn" class="button" type="button">导入</button>
+        <input type="file" id="import-file" accept=".gz,.tgz" hidden />
+      </div>
     </div>
-    <table id="accounts-table">
-      <thead>
-        <tr>
-          <th>Email</th><th>状态</th><th>strikes</th><th>cooldown</th><th>操作</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+    <div class="table-wrap">
+      <table id="accounts-table">
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>状态</th>
+            <th>Strikes</th>
+            <th>连续使用</th>
+            <th>冷却到</th>
+            <th>最后使用</th>
+            <th>最后错误</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </section>
-  <section id="usage-section">
-    <h2>使用统计</h2>
-    <pre id="usage-output">加载中...</pre>
-  </section>
+
+  <aside class="side-stack">
+    <section class="panel login-panel">
+      <div class="panel-head compact">
+        <div>
+          <p class="eyebrow">login</p>
+          <h2>网页登录</h2>
+        </div>
+        <span id="login-status-pill" class="pill tone-muted">idle</span>
+      </div>
+      <dl class="status-list">
+        <div>
+          <dt>开始时间</dt>
+          <dd id="login-started">—</dd>
+        </div>
+        <div>
+          <dt>会话</dt>
+          <dd id="login-session">—</dd>
+        </div>
+        <div>
+          <dt>错误</dt>
+          <dd id="login-error">—</dd>
+        </div>
+      </dl>
+      <div class="button-row">
+        <button id="open-vnc-btn" class="button" type="button" disabled>打开 VNC</button>
+        <button id="cancel-login-btn" class="button danger" type="button" disabled>取消</button>
+      </div>
+    </section>
+
+    <section class="panel usage-panel">
+      <div class="panel-head compact">
+        <div>
+          <p class="eyebrow">usage</p>
+          <h2>使用统计</h2>
+        </div>
+      </div>
+      <h3>模型</h3>
+      <div id="usage-models" class="mini-table"></div>
+      <h3>账号</h3>
+      <div id="usage-accounts" class="mini-table"></div>
+    </section>
+  </aside>
 </main>
+
+<div id="toast" class="toast" hidden></div>
+
 <script src="/admin/app.js"></script>
 </body>
 </html>

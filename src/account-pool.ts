@@ -36,7 +36,7 @@ const DATA_DIR = path.resolve(process.cwd(), process.env.DATA_DIR ?? "data");
 const POOL_STATE_PATH = path.join(DATA_DIR, "account-pool.json");
 const MAX_POOL_SIZE = parsePositiveInteger(process.env.MAX_POOL_SIZE, 1024);
 const ACCOUNT_COOLDOWN_HOURS = parsePositiveInteger(process.env.ACCOUNT_COOLDOWN_HOURS, 12);
-const ACCOUNT_MAX_STRIKES = parsePositiveInteger(process.env.ACCOUNT_MAX_STRIKES, 2);
+const ACCOUNT_MAX_STRIKES = parsePositiveInteger(process.env.ACCOUNT_MAX_STRIKES ?? process.env.FAILURE_THRESHOLD, 2);
 const SWITCH_ON_USES = parsePositiveInteger(process.env.SWITCH_ON_USES, 40);
 
 export class AccountPool {

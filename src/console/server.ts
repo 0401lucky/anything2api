@@ -38,6 +38,7 @@ export class ConsoleServer {
   private readonly limiter: RateLimiter;
   private loginState: {
     vncSessionId: string;
+    wsPort: number;
     status: "provisioning" | "waiting" | "detecting" | "done" | "failed" | "cancelled";
     controller: AbortController;
     error?: string;
@@ -58,6 +59,10 @@ export class ConsoleServer {
 
     if (pathname === "/login" && request.method === "GET") {
       return this.serveStatic(response, "login.html");
+    }
+
+    if (pathname === "/style.css") {
+      return this.serveStatic(response, "style.css");
     }
 
     if (pathname === "/api/login" && request.method === "POST") {
@@ -128,6 +133,28 @@ export class ConsoleServer {
       return;
     }
 
+    if (pathname === "/api/summary" && request.method === "GET") {
+      const [accounts, summary, usage] = await Promise.all([
+        this.deps.pool.listAccounts(),
+        this.deps.pool.getSummary(),
+        this.deps.usage ? this.deps.usage.aggregate() : Promise.resolve({ totalRequests: 0 }),
+      ]);
+      this.sendJson(response, 200, {
+        accounts: {
+          ...summary,
+          lastUsedAt: accounts
+            .map((account) => account.lastUsedAt)
+            .filter((value): value is string => !!value)
+            .sort()
+            .at(-1) ?? null,
+        },
+        usage,
+        login: this.serializeLoginState(),
+        vnc: this.deps.vnc.getStatus(),
+      });
+      return;
+    }
+
     if (pathname === "/api/login/start" && request.method === "POST") {
       if (this.loginState && ["provisioning", "waiting", "detecting"].includes(this.loginState.status)) {
         this.sendJson(response, 409, { error: { message: "login already in progress" } });
@@ -136,6 +163,7 @@ export class ConsoleServer {
       const vnc = await this.deps.vnc.start();
       const state = {
         vncSessionId: vnc.sessionId,
+        wsPort: vnc.wsPort,
         status: "provisioning" as const,
         controller: new AbortController(),
         startedAt: Date.now(),
@@ -164,7 +192,7 @@ export class ConsoleServer {
     }
 
     if (pathname === "/api/login/status" && request.method === "GET") {
-      this.sendJson(response, 200, this.loginState ?? { status: "idle" });
+      this.sendJson(response, 200, this.serializeLoginState());
       return;
     }
 
@@ -181,7 +209,11 @@ export class ConsoleServer {
     if (pathname.startsWith("/novnc/")) {
       const sub = pathname.slice("/novnc/".length);
       const novncRoot = process.env.NOVNC_DIR ?? "/usr/share/novnc";
-      const file = path.join(novncRoot, sub);
+      const file = path.resolve(novncRoot, sub);
+      if (!file.startsWith(path.resolve(novncRoot))) {
+        this.sendJson(response, 403, { error: { message: "forbidden" } });
+        return;
+      }
       try {
         await stat(file);
         response.writeHead(200, { "content-type": guessContentType(file) });
@@ -196,7 +228,6 @@ export class ConsoleServer {
       return this.serveStatic(response, "index.html");
     }
     if (pathname === "/app.js") return this.serveStatic(response, "app.js");
-    if (pathname === "/style.css") return this.serveStatic(response, "style.css");
     if (pathname === "/vnc.html") return this.serveStatic(response, "vnc.html");
 
     this.sendJson(response, 404, { error: { message: "Not found" } });
@@ -251,10 +282,22 @@ export class ConsoleServer {
     return entry ? { user: entry.user } : null;
   }
 
-  public getLoginStatus(): { vncSessionId: string; status: string } | null {
+  public getLoginStatus(): { vncSessionId: string; status: string; wsPort: number } | null {
     return this.loginState
-      ? { vncSessionId: this.loginState.vncSessionId, status: this.loginState.status }
+      ? { vncSessionId: this.loginState.vncSessionId, status: this.loginState.status, wsPort: this.loginState.wsPort }
       : null;
+  }
+
+  private serializeLoginState(): unknown {
+    if (!this.loginState) return { status: "idle" };
+    return {
+      vncSessionId: this.loginState.vncSessionId,
+      wsPort: this.loginState.wsPort,
+      status: this.loginState.status,
+      error: this.loginState.error,
+      session: this.loginState.session,
+      startedAt: this.loginState.startedAt,
+    };
   }
 
   private sendJson(response: ServerResponse, status: number, payload: unknown): void {

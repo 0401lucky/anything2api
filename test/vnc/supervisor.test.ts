@@ -16,6 +16,7 @@ test("VncSupervisor refuses concurrent start", async () => {
     wsPort: 6080,
     spawn: () => new FakeProcess() as unknown as any,
     sleep: async () => {},
+    waitForPort: async () => {},
   });
 
   const s1 = await supervisor.start();
@@ -35,6 +36,7 @@ test("VncSupervisor cleans up children on stop", async () => {
       return p as unknown as any;
     },
     sleep: async () => {},
+    waitForPort: async () => {},
   });
 
   const session = await supervisor.start();

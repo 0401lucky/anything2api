@@ -2,32 +2,172 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>VNC 登录</title>
-<style>body, html { margin: 0; height: 100%; overflow: hidden; } #screen { width: 100%; height: 100%; }</style>
+<style>
+html, body { background: #101812; color: #f6f8f2; height: 100%; margin: 0; overflow: hidden; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+#screen { height: 100%; width: 100%; }
+#screen canvas { display: block; height: 100% !important; width: 100% !important; }
+.status { align-items: center; background: rgba(16, 24, 18, 0.76); display: flex; inset: 0; justify-content: center; padding: 24px; position: fixed; text-align: center; z-index: 2; }
+.status[hidden] { display: none; }
+.status-card { background: rgba(246, 248, 242, 0.96); border: 1px solid rgba(255,255,255,.2); border-radius: 8px; box-shadow: 0 18px 60px rgba(0,0,0,.28); color: #18211c; max-width: 560px; padding: 24px; }
+.status-card h1 { font-size: 20px; letter-spacing: 0; margin: 0 0 8px; }
+.status-card p { color: #59645d; line-height: 1.55; margin: 0; }
+.status-card pre { background: #eef2ef; border-radius: 7px; overflow-x: auto; padding: 10px; text-align: left; white-space: pre-wrap; }
+.bar { align-items: center; backdrop-filter: blur(16px); background: rgba(246, 248, 242, 0.9); border: 1px solid rgba(255,255,255,.35); border-radius: 999px; bottom: 18px; box-shadow: 0 14px 45px rgba(0,0,0,.22); display: flex; gap: 8px; left: 50%; padding: 8px; position: fixed; transform: translateX(-50%); z-index: 3; }
+.bar button { align-items: center; background: transparent; border: 0; border-radius: 999px; color: #18211c; cursor: pointer; display: inline-flex; font: inherit; height: 38px; justify-content: center; min-width: 38px; padding: 0 12px; }
+.bar button:hover:not(:disabled) { background: rgba(47, 111, 71, .12); }
+.bar button:disabled { cursor: not-allowed; opacity: .45; }
+.bar .save { color: #2f6f47; font-weight: 700; }
+.bar .danger { color: #9f3732; }
+</style>
 </head>
 <body>
 <div id="screen"></div>
+<div id="status" class="status">
+  <div class="status-card">
+    <h1 id="status-title">正在加载 VNC</h1>
+    <p id="status-detail">请稍候</p>
+  </div>
+</div>
+<div class="bar">
+  <button id="back-btn" type="button" title="返回">返回</button>
+  <button id="text-btn" type="button" title="输入文本" disabled>输入</button>
+  <button id="enter-btn" type="button" title="发送回车" disabled>回车</button>
+  <button id="backspace-btn" type="button" title="退格" disabled>退格</button>
+  <button id="cancel-btn" class="danger" type="button" title="取消登录">取消</button>
+</div>
 <script type="module">
-import RFB from "/admin/novnc/core/rfb.js";
-
 const params = new URLSearchParams(location.search);
 const sessionId = params.get("session");
-const wsProto = location.protocol === "https:" ? "wss" : "ws";
-const wsUrl = `${wsProto}://${location.host}/admin/vnc/${sessionId}`;
-const rfb = new RFB(document.getElementById("screen"), wsUrl);
-rfb.viewOnly = false;
-rfb.scaleViewport = true;
+const screen = document.getElementById("screen");
+const statusBox = document.getElementById("status");
+const statusTitle = document.getElementById("status-title");
+const statusDetail = document.getElementById("status-detail");
+const inputButtons = ["text-btn", "enter-btn", "backspace-btn"].map((id) => document.getElementById(id));
+let rfb = null;
+let connected = false;
 
-setInterval(async () => {
-  const status = await (await fetch("/admin/api/login/status")).json();
-  if (status.status === "done") {
-    alert("登录完成: " + status.session.email);
-    location.href = "/admin/";
-  } else if (status.status === "failed" || status.status === "cancelled") {
-    alert("登录失败: " + (status.error || status.status));
-    location.href = "/admin/";
+function setStatus(title, detail = "", visible = true) {
+  statusTitle.textContent = title;
+  statusDetail.innerHTML = detail;
+  statusBox.hidden = !visible;
+}
+
+function setConnected(value) {
+  connected = value;
+  inputButtons.forEach((button) => { button.disabled = !value; });
+}
+
+async function loadRfb() {
+  try {
+    return (await import("/admin/novnc/core/rfb.js")).default;
+  } catch (localError) {
+    try {
+      return (await import("https://esm.sh/@novnc/novnc@1.4.0/lib/rfb.js")).default;
+    } catch (remoteError) {
+      throw new Error(`本地 noVNC 加载失败：${localError.message || localError}\nCDN 加载失败：${remoteError.message || remoteError}`);
+    }
   }
-}, 3000);
+}
+
+async function start() {
+  if (!sessionId) {
+    setStatus("缺少 VNC 会话", "请从控制台重新打开登录窗口。");
+    return;
+  }
+
+  try {
+    const RFB = await loadRfb();
+    setStatus("正在连接 VNC", "浏览器窗口启动后会显示在这里。");
+    const wsProto = location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${wsProto}://${location.host}/admin/vnc/${encodeURIComponent(sessionId)}`;
+    rfb = new RFB(screen, wsUrl, { shared: true });
+    rfb.viewOnly = false;
+    rfb.scaleViewport = true;
+    rfb.resizeSession = false;
+    rfb.addEventListener("connect", () => {
+      setConnected(true);
+      setStatus("", "", false);
+    });
+    rfb.addEventListener("disconnect", (event) => {
+      const clean = event?.detail?.clean;
+      const wasConnected = connected;
+      setConnected(false);
+      if (!wasConnected && !clean) {
+        setStatus("VNC 连接失败", websocketHelp());
+        return;
+      }
+      setStatus("VNC 会话已关闭", clean ? "会话已正常结束。" : "连接意外中断，请回到控制台重试。");
+    });
+    rfb.addEventListener("securityfailure", () => {
+      setConnected(false);
+      setStatus("VNC 身份验证失败", "服务器拒绝了连接。");
+    });
+  } catch (error) {
+    setStatus("启动 VNC 失败", `<pre>${escapeHtml(error.message || error)}</pre>`);
+  }
+}
+
+function websocketHelp() {
+  return `
+    WebSocket 握手没有成功。若前面有 Nginx、Cloudflare 或平台反代，请确认已转发 Upgrade 与 Connection 头。
+    <pre>proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "Upgrade";</pre>
+  `;
+}
+
+async function pollStatus() {
+  try {
+    const status = await (await fetch("/admin/api/login/status", { credentials: "include" })).json();
+    if (status.status === "done") {
+      setStatus("登录完成", `已保存账号：${escapeHtml(status.session?.email || "未知邮箱")}`);
+      setTimeout(() => { location.href = "/admin/"; }, 900);
+    } else if (status.status === "failed" || status.status === "cancelled") {
+      setStatus("登录失败", escapeHtml(status.error || status.status));
+    }
+  } catch {
+    setStatus("状态同步失败", "无法读取登录状态。");
+  }
+}
+
+document.getElementById("back-btn").addEventListener("click", () => { location.href = "/admin/"; });
+document.getElementById("cancel-btn").addEventListener("click", async () => {
+  await fetch("/admin/api/login/cancel", { method: "POST", credentials: "include" }).catch(() => {});
+  location.href = "/admin/";
+});
+document.getElementById("enter-btn").addEventListener("click", () => sendKey(0xff0d, "Enter"));
+document.getElementById("backspace-btn").addEventListener("click", () => sendKey(0xff08, "Backspace"));
+document.getElementById("text-btn").addEventListener("click", () => {
+  if (!rfb || !connected) return;
+  const text = prompt("输入要发送到远程浏览器的文本");
+  if (!text) return;
+  for (const char of text) {
+    const code = char.charCodeAt(0);
+    rfb.sendKey(code, char, true);
+    rfb.sendKey(code, char, false);
+  }
+});
+
+function sendKey(code, name) {
+  if (!rfb || !connected) return;
+  rfb.sendKey(code, name, true);
+  rfb.sendKey(code, name, false);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[ch]));
+}
+
+start();
+setInterval(pollStatus, 3000);
 </script>
 </body>
 </html>
