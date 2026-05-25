@@ -1,0 +1,19 @@
+services:
+  anything2api:
+    build: .
+    image: anything2api:latest
+    container_name: anything2api
+    ports:
+      - "127.0.0.1:7860:7860"
+    restart: unless-stopped
+    environment:
+      PORT: "7860"
+      API_KEYS: "change-me"
+      WEB_CONSOLE_PASSWORD: "change-me-too"
+      STREAMING_MODE: "real"
+      ACCOUNT_COOLDOWN_HOURS: "12"
+      FAILURE_THRESHOLD: "3"
+      IMMEDIATE_SWITCH_STATUS_CODES: "429,403,401"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - ./data:/app/data
