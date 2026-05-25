@@ -13,7 +13,6 @@ import { AccountPool, type PoolAccountRecord } from "./account-pool.js";
 import { MetricsRegistry } from "./metrics.js";
 import { SUPPORTED_MODEL_IDS, resolveModel } from "./model-catalog.js";
 import { cleanAssistantOutput } from "./output-cleaning.js";
-import { BackgroundPoolExpander } from "./pool-expander.js";
 import { formatError } from "./util/error.js";
 import {
   endSse,
@@ -41,7 +40,6 @@ import {
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const ANYTHING_BASE_URL = process.env.ANYTHING_BASE_URL ?? "https://www.anything.com";
 const TRACE_DIR = path.resolve(process.cwd(), process.env.TRACE_DIR ?? "data/traces");
-const POOL_SIZE = Number.parseInt(process.env.POOL_SIZE ?? "3", 10);
 const MAX_FAILOVER_ATTEMPTS = Number.parseInt(process.env.MAX_FAILOVER_ATTEMPTS ?? "4", 10);
 interface OpenAIChatCompletionRequest {
   model?: string;
@@ -84,8 +82,7 @@ interface ToolAwareGenerationResult {
 
 export async function startApiServer(log: (message: string) => void = console.log): Promise<void> {
   const backend = new AnythingProxyBackend(log);
-  backend.warmPoolInBackground();
-  backend.startBackgroundExpansion();
+  await backend.refreshPoolMetrics();
   const server = createServer(async (request, response) => {
     const finishMetrics = backend.metrics.beginHttpRequest();
     setCorsHeaders(response);
@@ -119,29 +116,12 @@ export async function startApiServer(log: (message: string) => void = console.lo
 
 class AnythingProxyBackend {
   private readonly pool: AccountPool;
-  private readonly expander: BackgroundPoolExpander;
   private readonly browsers = new Map<string, BrowserSessionHandle>();
   private readonly busyAccountIds = new Set<string>();
   public readonly metrics = new MetricsRegistry();
 
   public constructor(private readonly log: (message: string) => void) {
     this.pool = new AccountPool(log);
-    this.expander = new BackgroundPoolExpander(this.pool, log);
-  }
-
-  public async warmPool(): Promise<void> {
-    await this.pool.ensureReady(POOL_SIZE);
-    this.pool.warmInBackground(POOL_SIZE);
-  }
-
-  public warmPoolInBackground(): void {
-    void this.warmPool().catch((error) => {
-      this.log(`[-] 后台预热失败: ${formatError(error)}`);
-    });
-  }
-
-  public startBackgroundExpansion(): void {
-    this.expander.start();
   }
 
   public async generate(prompt: string, model?: string): Promise<{ text: string; model: string; account: PoolAccountRecord }> {
@@ -155,7 +135,6 @@ class AnythingProxyBackend {
       try {
         const result = await this.generateOnce(account, prompt, model);
         await this.pool.markSuccess(account.accountId);
-        this.pool.warmInBackground(POOL_SIZE);
         this.refreshPoolMetrics();
         return result;
       } catch (error) {
@@ -164,7 +143,6 @@ class AnythingProxyBackend {
         await this.pool.markFailure(account.accountId, error);
         this.metrics.recordFailover();
         await this.disposeBrowser(account.accountId);
-        this.pool.warmInBackground(POOL_SIZE);
         this.refreshPoolMetrics();
       } finally {
         this.busyAccountIds.delete(account.accountId);
@@ -190,7 +168,6 @@ class AnythingProxyBackend {
       try {
         const result = await this.generateOnce(account, prompt, model, onUpdate);
         await this.pool.markSuccess(account.accountId);
-        this.pool.warmInBackground(POOL_SIZE);
         this.refreshPoolMetrics();
         return result;
       } catch (error) {
@@ -199,7 +176,6 @@ class AnythingProxyBackend {
         await this.pool.markFailure(account.accountId, error);
         this.metrics.recordFailover();
         await this.disposeBrowser(account.accountId);
-        this.pool.warmInBackground(POOL_SIZE);
         this.refreshPoolMetrics();
       } finally {
         this.busyAccountIds.delete(account.accountId);
@@ -279,7 +255,6 @@ class AnythingProxyBackend {
         this.refreshPoolMetrics();
         return account;
       } catch {
-        this.pool.warmInBackground(POOL_SIZE);
         await delay(1_000);
       }
     }
