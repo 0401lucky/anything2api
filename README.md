@@ -1,309 +1,148 @@
 # anything-2api
 
-把 `anything.com` 的账号注册、登录和会话托管成一个本地/远程 2api 代理。
+把 `anything.com` 包装成兼容 OpenAI / Anthropic 的本地/远程 2api 代理。**自带 Google 账号**版本（不再批量注册）。
 
 ## 功能
 
-- TypeScript 实现
-- Razmail (`mail.razkord.top`) 批量注册
-- Puppeteer + stealth 登录
-- 每账号稳定指纹
-- 账号池/负载均衡
-- 失败自动切号
-- cooldown 12h，连续失败 2 次删除
-- OpenAI 兼容：
-  - `GET /v1/models`
-  - `POST /v1/chat/completions`
-  - `POST /v1/completions`
-  - `POST /v1/responses`
-- Anthropic 兼容：
-  - `POST /v1/messages`
-- 基础 streaming 支持
+- OpenAI 兼容：`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/models`
+- Anthropic 兼容：`/v1/messages`
+- API_KEYS 鉴权
+- 真流式 + 假流式可切换（Cloudflare Worker 长连接友好）
+- 多账号池 + LRU 轮询 + 失败 cooldown + 主动轮转
+- 自动清洗站内 reasoning UI 块
 - best-effort `tool_calls` / `tool_use`
-- 自动清洗站内 reasoning UI 块，并把提取结果放进 `reasoning`
+- Web 控制台 + 容器内 noVNC 登录账号（直接在浏览器里完成 Google 登录）
+- usage-stats.jsonl 持久化
+- Prometheus `/metrics`
+- Cloudflare Worker 反代（隐藏源站 IP）
 
-## 当前模型
+## 快速开始（Docker）
 
-当前代理接受这些模型名：
-
-- `anything-auto`
-- `openai`
-- `openai-gpt-4.1`
-- `gpt-5.4`
-- `gpt-5.2`
-- `gpt-4.1`
-- `claude-sonnet-4`
-- `anthropic-sonnet-4.6`
-- `claude-sonnet-4.6`
-- `claude-sonnet-4-6`
-- `claude-opus-4-6`
-- `opus-46`
-- `claude-3.7-sonnet`
-- `claude-3.5-sonnet`
-- `claude-haiku`
-- `gemini-2.5-pro`
-- `gemini-1.5`
-- `gemini-31-pro`
-- `gemini-3`
-
-说明：
-
-- 这份列表优先按 Anything 当前前端启动配置里真实暴露的 provider / feature flag 对齐
-- 代理会把常见别名映射到 Anything 当前使用的 provider 名
-
-### 一键抓当前 Anything 模型暴露
-
-```powershell
-npm run discover-models
+```bash
+cp docker-compose.yml my.yml
+# 改 API_KEYS / WEB_CONSOLE_PASSWORD
+docker compose -f my.yml up -d
 ```
 
-这个脚本会抓 `https://www.anything.com` 当前下发的：
+打开 `http://127.0.0.1:7860/admin/login` → 输入 `WEB_CONSOLE_PASSWORD` → 点「添加账号」→ 在弹出的 noVNC 页面里完成 Google 登录。
 
-- `portkey-providers`
-- 若干模型 feature flags
+之后客户端就可以用：
 
-然后输出建议模型清单。
+```bash
+curl -X POST http://127.0.0.1:7860/v1/chat/completions \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"你好"}]}'
+```
 
-## 安装
+## 快速开始（本地开发，需要图形界面）
 
-```powershell
+```bash
 npm install
 npm run build
+HEADLESS=false API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run login   # 弹出 Chromium 让你登录
+API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run serve
 ```
 
-## 常用命令
+## 控制台
 
-### 单独注册/登录一个号
+详见 [docs/admin-console.md](docs/admin-console.md)。
 
-```powershell
-npm run login
-```
+## API 鉴权
 
-### 预填充账号池
+`/v1/*` 必须带 `Authorization: Bearer <key>` 或 `x-api-key: <key>`，key 与 `API_KEYS` 环境变量逗号分隔列表匹配即可。未设 `API_KEYS` 启动直接退出。
 
-```powershell
-$env:POOL_SIZE=5
-npm run pool:fill -- 5
-```
+## 环境变量参考
 
-### 查看账号池
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PORT` | `7860` | HTTP 端口 |
+| `API_KEYS` | 必填 | 逗号分隔的可用 key 列表 |
+| `WEB_CONSOLE_PASSWORD` | 可选 | 未设则禁用控制台 |
+| `WEB_CONSOLE_USERNAME` | 可选 | 设了就要双因子 |
+| `METRICS_TOKEN` | 可选 | 设了 `/metrics` 也要鉴权 |
+| `CONSOLE_SESSION_TTL_HOURS` | `24` | 控制台 cookie 有效期 |
+| `RATE_LIMIT_MAX_ATTEMPTS` | `5` | 控制台登录失败次数 |
+| `RATE_LIMIT_WINDOW_MINUTES` | `15` | 失败窗口 |
+| `HEADLESS` | `true` | 服务运行时 puppeteer 模式 |
+| `DATA_DIR` | `data` | 数据目录 |
+| `MAX_POOL_SIZE` | `32` | 账号上限 |
+| `ACCOUNT_COOLDOWN_HOURS` | `12` | cooldown 时长 |
+| `FAILURE_THRESHOLD` | `3` | 连续失败到此进入 deleted |
+| `ACCOUNT_MAX_STRIKES` | 同义于 `FAILURE_THRESHOLD` | 向后兼容 |
+| `IMMEDIATE_SWITCH_STATUS_CODES` | `429,403,401` | 立即 cooldown 的 HTTP 状态 |
+| `SWITCH_ON_USES` | `40` | 单号被连续使用上限，到了主动轮转 |
+| `MAX_FAILOVER_ATTEMPTS` | `4` | 单次请求允许切几次号 |
+| `STREAMING_MODE` | `real` | `real` / `fake` |
+| `STREAM_TIMEOUT_MS` | `60000` | 真流式 chunk 间最大间隔 |
+| `FAKE_STREAM_TIMEOUT_MS` | `300000` | 假流式整体超时 |
+| `VNC_LOGIN_TIMEOUT_MS` | `600000` | noVNC 登录会话超时 |
+| `ENABLE_USAGE_STATS` | `true` | 是否写 usage-stats.jsonl |
+| `USAGE_MAX_BYTES` | `52428800` | usage-stats rotate 阈值（50MB） |
+| `ANYTHING_BASE_URL` | `https://www.anything.com` | 上游 |
+| `TZ` | 系统时区 | |
+| `NOVNC_DIR` | `/usr/share/novnc` | noVNC 静态资源路径 |
 
-```powershell
-npm run pool:status
-```
+## 部署方案矩阵
 
-### 启动代理
+| 平台 | 状态 | 说明 |
+| --- | --- | --- |
+| 本地电脑 | ✅ | 直接 `npm run serve`，本机能 Google 登录 |
+| VPS / 云服务器 | ✅ 推荐 | 用 Docker；或本机登录后上传 `data/` 到 VPS |
+| Docker（Render/Fly.io/Railway/Zeabur） | ✅ | 通过容器内 noVNC 登录 |
+| Cloudflare Workers | ❌ | 无 Node、无浏览器，不能跑主服务；但 worker/anything2api 仍可做反代 |
 
-```powershell
-$env:PORT=8790
-$env:POOL_SIZE=5
-$env:MAX_POOL_SIZE=1024
-npm run serve
-```
-
-## 环境变量
-
-- `PORT`：监听端口，默认 `8787`
-- `POOL_SIZE`：目标可用账号数，默认 `3`
-- `MAX_POOL_SIZE`：账号池上限，默认 `1024`
-- `ACCOUNT_COOLDOWN_HOURS`：失败 cooldown 小时数，默认 `12`
-- `ACCOUNT_MAX_STRIKES`：连续失败上限，默认 `2`
-- `HEADLESS`：`true/false`
-- `DATA_DIR`：数据目录，默认 `./data`
-- `ANYTHING_BASE_URL`：默认 `https://www.anything.com`
-- `RAZMAIL_BASE_URL`：默认 `https://mail.razkord.top`
-
-## 账号池策略
-
-- 启动后后台持续补货
-- 可用账号不足时自动继续注册
-- 账号失败后：
-  - 第 1 次：`cooldown 12h`
-  - 第 2 次：从可用池删除
-- 请求期间账号失败会自动切到别的号继续
-
-## OpenAI 示例
-
-```powershell
-$body = @{
-  model = 'gpt-5.4'
-  messages = @(
-    @{ role = 'user'; content = '你好' }
-  )
-} | ConvertTo-Json -Depth 8
-
-Invoke-RestMethod `
-  -Uri 'http://127.0.0.1:8790/v1/chat/completions' `
-  -Method Post `
-  -ContentType 'application/json' `
-  -Body $body
-```
-
-## Anthropic 示例
-
-```powershell
-$body = @{
-  model = 'claude-sonnet-4'
-  messages = @(
-    @{ role = 'user'; content = '你好' }
-  )
-} | ConvertTo-Json -Depth 8
-
-Invoke-RestMethod `
-  -Uri 'http://127.0.0.1:8790/v1/messages' `
-  -Method Post `
-  -ContentType 'application/json' `
-  -Body $body
-```
-
-## Streaming
-
-- `chat.completions`：支持 `stream=true`
-- `completions`：支持 `stream=true`
-- `responses`：支持 `stream=true`
-- `messages`：支持 `stream=true`
-
-当前 streaming 是代理层轮询 revision 并转成 SSE。
-
-## Reasoning 清洗
-
-站内有时会把 reasoning 以类似下面的 UI 块混进正文：
-
-```html
-<file-based-block ... thinkingType="reasoning">...</file-based-block>
-```
-
-代理会：
-
-- 自动把这类块从 `content` / `text` 中剥离
-- 把提取到的内容放到扩展字段 `reasoning`
-
-## Tool calls
-
-当前 `tool_calls` / `tool_use` 是 best-effort 兼容：
-
-- 先让模型按固定 JSON 格式输出
-- 支持从 reasoning 前缀中截断，尽量从第一个结构化 JSON 开始识别
-- 若 `tool_choice=required` 且模型仍不配合，会走启发式 fallback，尽量返回一个工具调用
-
-## 测试
-
-```powershell
-npm test
-```
-
-## systemd 部署思路
-
-服务名示例：`anything-2api.service`
-
-工作目录：
-
-```text
-/opt/anything-2api
-```
-
-启动命令：
-
-```text
-/usr/bin/npm run serve
-```
-
-建议环境：
-
-- `PORT=8790`
-- `POOL_SIZE=32`
-- `MAX_POOL_SIZE=1024`
-- `HEADLESS=true`
-- `DATA_DIR=/var/lib/anything-2api`
+详细 Zeabur 部署见 [docs/deploy-zeabur.md](docs/deploy-zeabur.md)。
 
 ## Cloudflare Worker 反代
 
-已提供 worker 工程：
-
-```text
-worker/anything2api
-```
-
-特点：
-
-- worker 名字：`anything2api`
-- 普通请求直接反代到源站
-- `stream=true` / `text/event-stream` 请求走 Durable Object
-- Durable Object 按 shard 转发流式响应，避免所有 streaming 都直接打源站
-
-关键文件：
-
-- `worker/anything2api/wrangler.jsonc`
-- `worker/anything2api/src/index.ts`
-
-### Worker 环境变量
-
-- `UPSTREAM_BASE_URL`
-- `STREAM_SHARDS`
-- `MAX_CONCURRENT_STREAMS_PER_SHARD`
-- `WORKER_AUTH_TOKEN`（可选）
-
-### 部署示例
+仓库内 `worker/anything2api` 是现成反代工程：
 
 ```bash
 cd worker/anything2api
+# 把 wrangler.jsonc 里 UPSTREAM_BASE_URL 改成你的源站
 wrangler deploy
 ```
 
-如果要改成你的正式域名，建议把：
-
-```text
-UPSTREAM_BASE_URL=http://122.51.245.211:8790
-```
-
-保留为当前源站地址，然后给 worker 配 route 即可。
+特点：
+- 普通请求直接反代
+- `stream=true` 走 Durable Object 分片
+- 可选 `WORKER_AUTH_TOKEN` 二次鉴权
 
 ## Metrics / Prometheus / Grafana
 
-服务现在暴露：
-
-```text
-GET /metrics
-```
-
-Prometheus 指标包括：
+`GET /metrics` 暴露 Prometheus 文本格式，包含：
 
 - `anything2api_http_requests_total`
-- `anything2api_http_request_duration_seconds`
-- `anything2api_http_inflight_requests`
 - `anything2api_generation_requests_total`
 - `anything2api_generation_failovers_total`
 - `anything2api_tool_calls_total`
-- `anything2api_prompt_chars_total`
-- `anything2api_completion_chars_total`
-- `anything2api_estimated_prompt_tokens_total`
-- `anything2api_estimated_completion_tokens_total`
-- `anything2api_pool_active_accounts`
-- `anything2api_pool_cooldown_accounts`
-- `anything2api_pool_deleted_accounts`
-- `anything2api_pool_total_accounts`
-- `anything2api_pool_busy_accounts`
+- `anything2api_pool_active_accounts` / `cooldown` / `deleted` / `busy`
+- 等等
 
-### Prometheus / Grafana 部署文件
+Prometheus / Grafana 部署文件在 `deploy/` 目录。
 
-已提供：
+## CLI
 
-- `deploy/prometheus/prometheus.yml`
-- `deploy/prometheus/prometheus.service`
-- `deploy/grafana/provisioning/datasources/prometheus.yaml`
-- `deploy/grafana/provisioning/dashboards/dashboards.yaml`
-- `deploy/grafana/dashboards/anything2api-overview.json`
+- `npm run serve`：启动 2api
+- `npm run login`：本地图形界面登录（要求 `HEADLESS=false`）
+- `npm run accounts:list`：列出账号
+- `npm run accounts:remove -- <accountId>`：删账号
+- `npm run accounts:reactivate -- <accountId>`：把账号从 cooldown / deleted 拉回 active
+- `npm run accounts:export -- <accountId> <out.tar.gz>`：导出账号包
+- `npm run accounts:import -- <archive.tar.gz>`：导入账号包
 
-说明：
+## 测试
 
-- Prometheus 监听建议端口：`19090`
-- Grafana 默认可监听：`3000`
-- Dashboard 已包含：
-  - RPM
-  - Estimated TPM
-  - Pool active/busy/cooldown/deleted
-  - request p95
-  - failover rate
-  - `up{job="anything2api"}`
-  - `up{job="gitlab_workhorse"}`
-  - `up{job="traefik"}`
+```bash
+npm test
+```
+
+## 升级到 BYO Account 版本
+
+如果你从批量注册版本升级：
+
+1. 现有 `data/accounts/<id>/` 与 `data/account-pool.json` 保留可用。
+2. 旧的 `registered_emails.txt` / `registered_results.jsonl` 不再被读，可以删掉。
+3. `npm run register` / `npm run pool:fill` 已废弃，启动时不会再自动注册。
+4. 必须设置 `API_KEYS` 与 `WEB_CONSOLE_PASSWORD` 才能启动。
