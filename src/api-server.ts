@@ -55,6 +55,8 @@ const IMMEDIATE_SWITCH_STATUS_CODES = new Set(
     .filter((item) => Number.isFinite(item) && item > 0),
 );
 const ACCOUNT_COOLDOWN_HOURS = Number.parseInt(process.env.ACCOUNT_COOLDOWN_HOURS ?? "12", 10);
+const STREAMING_MODE_DEFAULT: "real" | "fake" =
+  (process.env.STREAMING_MODE ?? "real").toLowerCase() === "fake" ? "fake" : "real";
 interface OpenAIChatCompletionRequest {
   model?: string;
   messages?: Array<{ role?: string; content?: unknown }>;
@@ -648,6 +650,12 @@ async function streamChatCompletions(
   tools: unknown,
   toolChoice: unknown,
 ): Promise<void> {
+  const mode = resolveStreamingMode(model);
+  if (mode === "fake") {
+    await streamChatCompletionsFake(response, backend, prompt, model, tools, toolChoice);
+    return;
+  }
+
   setupSse(response);
 
   const normalizedTools = normalizeTools(tools);
@@ -729,6 +737,12 @@ async function streamLegacyCompletion(
   prompt: string,
   model: string | undefined,
 ): Promise<void> {
+  const mode = resolveStreamingMode(model);
+  if (mode === "fake") {
+    await streamLegacyCompletionFake(response, backend, prompt, model);
+    return;
+  }
+
   setupSse(response);
   let emittedText = "";
 
@@ -769,6 +783,12 @@ async function streamResponses(
   tools: unknown,
   toolChoice: unknown,
 ): Promise<void> {
+  const mode = resolveStreamingMode(model);
+  if (mode === "fake") {
+    await streamResponsesFake(response, backend, prompt, model, tools, toolChoice);
+    return;
+  }
+
   setupSse(response);
 
   const normalizedTools = normalizeTools(tools);
@@ -855,6 +875,12 @@ async function streamAnthropicMessages(
   tools: unknown,
   toolChoice: unknown,
 ): Promise<void> {
+  const mode = resolveStreamingMode(model);
+  if (mode === "fake") {
+    await streamAnthropicMessagesFake(response, backend, prompt, model, tools, toolChoice);
+    return;
+  }
+
   setupSse(response);
   writeAnthropicStart(response, model ?? "anything-auto");
 
@@ -1194,4 +1220,137 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
   });
+}
+
+function resolveStreamingMode(modelHint: string | undefined): "real" | "fake" {
+  const resolved = resolveModel(modelHint);
+  if (resolved.streamingMode === "default") return STREAMING_MODE_DEFAULT;
+  return resolved.streamingMode;
+}
+
+async function streamChatCompletionsFake(
+  response: ServerResponse<IncomingMessage>,
+  backend: AnythingProxyBackend,
+  prompt: string,
+  model: string | undefined,
+  tools: unknown,
+  toolChoice: unknown,
+): Promise<void> {
+  setupSse(response);
+  const toolResult = await generateWithOptionalTools({ backend, prompt, model, tools, toolChoice });
+  if (toolResult.toolCall) {
+    backend.metrics.recordToolCall();
+    writeOpenAIChatToolCallDelta(
+      response,
+      toolResult.toolCall,
+      toolResult.toolCall.name,
+      toolResult.toolCall.argumentsText,
+      toolResult.model,
+    );
+    writeOpenAIFinish(response, "tool_calls", toolResult.model);
+    endSse(response);
+    return;
+  }
+
+  const chunkSize = 64;
+  for (let i = 0; i < toolResult.text.length; i += chunkSize) {
+    writeOpenAIChatTextDelta(response, toolResult.text.slice(i, i + chunkSize), toolResult.model);
+  }
+  writeOpenAIFinish(response, "stop", toolResult.model);
+  endSse(response);
+}
+
+async function streamLegacyCompletionFake(
+  response: ServerResponse<IncomingMessage>,
+  backend: AnythingProxyBackend,
+  prompt: string,
+  model: string | undefined,
+): Promise<void> {
+  setupSse(response);
+  const result = await backend.generate(prompt, model);
+  const cleaned = cleanAssistantOutput(result.text);
+  const chunkSize = 64;
+  for (let i = 0; i < cleaned.content.length; i += chunkSize) {
+    response.write(
+      `data: ${JSON.stringify({
+        id: `cmpl_${Date.now()}`,
+        object: "text_completion",
+        model: result.model,
+        choices: [{ text: cleaned.content.slice(i, i + chunkSize), index: 0, finish_reason: null }],
+      })}\n\n`,
+    );
+  }
+  response.write(
+    `data: ${JSON.stringify({
+      id: `cmpl_${Date.now()}`,
+      object: "text_completion",
+      model: result.model,
+      choices: [{ text: "", index: 0, finish_reason: "stop" }],
+    })}\n\n`,
+  );
+  endSse(response);
+}
+
+async function streamResponsesFake(
+  response: ServerResponse<IncomingMessage>,
+  backend: AnythingProxyBackend,
+  prompt: string,
+  model: string | undefined,
+  tools: unknown,
+  toolChoice: unknown,
+): Promise<void> {
+  setupSse(response);
+  const toolResult = await generateWithOptionalTools({ backend, prompt, model, tools, toolChoice });
+  if (toolResult.toolCall) {
+    backend.metrics.recordToolCall();
+    writeResponsesToolCallDelta(
+      response,
+      toolResult.toolCall,
+      toolResult.toolCall.name,
+      toolResult.toolCall.argumentsText,
+      toolResult.model,
+    );
+    response.write(`data: ${JSON.stringify({ type: "response.completed", response: buildResponsesPayload(toolResult) })}\n\n`);
+    endSse(response);
+    return;
+  }
+
+  const chunkSize = 64;
+  for (let i = 0; i < toolResult.text.length; i += chunkSize) {
+    writeResponsesTextDelta(response, toolResult.text.slice(i, i + chunkSize), toolResult.model);
+  }
+  response.write(`data: ${JSON.stringify({ type: "response.completed", response: buildResponsesPayload(toolResult) })}\n\n`);
+  endSse(response);
+}
+
+async function streamAnthropicMessagesFake(
+  response: ServerResponse<IncomingMessage>,
+  backend: AnythingProxyBackend,
+  prompt: string,
+  model: string | undefined,
+  tools: unknown,
+  toolChoice: unknown,
+): Promise<void> {
+  setupSse(response);
+  writeAnthropicStart(response, model ?? "anything-auto");
+  const toolResult = await generateWithOptionalTools({ backend, prompt, model, tools, toolChoice });
+  if (toolResult.toolCall) {
+    backend.metrics.recordToolCall();
+    writeAnthropicToolDelta(
+      response,
+      toolResult.toolCall,
+      toolResult.toolCall.name,
+      toolResult.toolCall.argumentsText,
+    );
+    writeAnthropicStop(response, "tool_use");
+    response.end();
+    return;
+  }
+
+  const chunkSize = 64;
+  for (let i = 0; i < toolResult.text.length; i += chunkSize) {
+    writeAnthropicTextDelta(response, toolResult.text.slice(i, i + chunkSize));
+  }
+  writeAnthropicStop(response, "end_turn");
+  response.end();
 }
