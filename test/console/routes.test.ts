@@ -18,13 +18,27 @@ function makeReqRes(method: string, headers: Record<string, string> = {}): { req
   return { req, res, collected };
 }
 
+function makeDeps(): import("../../src/console/server.js").ConsoleServerDeps {
+  return {
+    pool: {
+      listAccounts: async () => [],
+      removeAccount: async () => undefined,
+      reactivateAccount: async () => null,
+      addPreparedSession: async () => null,
+    } as any,
+    usage: null,
+    importArchive: async () => ({}) as any,
+    exportAccount: async () => ({ archivePath: "", cleanup: async () => undefined }),
+  };
+}
+
 test("ConsoleServer rejects wrong password", async () => {
   const server = new ConsoleServer({
     password: "secret",
     sessionTtlMs: 60_000,
     rateLimitMax: 5,
     rateLimitWindowMs: 60_000,
-  });
+  }, makeDeps());
   const { req, res, collected } = makeReqRes("POST");
   (req as any)[Symbol.asyncIterator] = async function* () {
     yield Buffer.from(JSON.stringify({ password: "wrong" }));
@@ -39,7 +53,7 @@ test("ConsoleServer accepts right password and sets cookie", async () => {
     sessionTtlMs: 60_000,
     rateLimitMax: 5,
     rateLimitWindowMs: 60_000,
-  });
+  }, makeDeps());
   const { req, res, collected } = makeReqRes("POST");
   (req as any)[Symbol.asyncIterator] = async function* () {
     yield Buffer.from(JSON.stringify({ password: "secret" }));

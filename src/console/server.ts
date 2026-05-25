@@ -4,6 +4,9 @@ import { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { AccountPool } from "../account-pool.js";
+import type { AccountSessionRecord } from "../account.js";
+import type { UsageTracker } from "../usage/tracker.js";
 import { constantTimeStringEqual, ConsoleSessionStore, RateLimiter } from "../auth/console-session.js";
 
 const STATIC_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "static");
@@ -16,11 +19,21 @@ export interface ConsoleServerOptions {
   rateLimitWindowMs: number;
 }
 
+export interface ConsoleServerDeps {
+  pool: AccountPool;
+  usage: UsageTracker | null;
+  importArchive(stream: NodeJS.ReadableStream): Promise<AccountSessionRecord>;
+  exportAccount(accountId: string): Promise<{ archivePath: string; cleanup: () => Promise<void> }>;
+}
+
 export class ConsoleServer {
   private readonly sessions: ConsoleSessionStore;
   private readonly limiter: RateLimiter;
 
-  public constructor(private readonly options: ConsoleServerOptions) {
+  public constructor(
+    private readonly options: ConsoleServerOptions,
+    private readonly deps: ConsoleServerDeps,
+  ) {
     this.sessions = new ConsoleSessionStore(options.sessionTtlMs);
     this.limiter = new RateLimiter(options.rateLimitMax, options.rateLimitWindowMs);
   }
@@ -48,6 +61,55 @@ export class ConsoleServer {
         return;
       }
       this.sendJson(response, 401, { error: { message: "Unauthorized" } });
+      return;
+    }
+
+    if (pathname === "/api/accounts" && request.method === "GET") {
+      const accounts = await this.deps.pool.listAccounts();
+      this.sendJson(response, 200, accounts);
+      return;
+    }
+
+    const accountIdMatch = pathname.match(/^\/api\/accounts\/([^/]+)$/);
+    if (accountIdMatch && request.method === "DELETE") {
+      await this.deps.pool.removeAccount(accountIdMatch[1]!);
+      this.sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    const reactivateMatch = pathname.match(/^\/api\/accounts\/([^/]+)\/reactivate$/);
+    if (reactivateMatch && request.method === "POST") {
+      const result = await this.deps.pool.reactivateAccount(reactivateMatch[1]!);
+      this.sendJson(response, 200, result);
+      return;
+    }
+
+    const exportMatch = pathname.match(/^\/api\/accounts\/([^/]+)\/export$/);
+    if (exportMatch && request.method === "GET") {
+      const { archivePath, cleanup } = await this.deps.exportAccount(exportMatch[1]!);
+      response.writeHead(200, {
+        "content-type": "application/gzip",
+        "content-disposition": `attachment; filename="${exportMatch[1]}.tar.gz"`,
+      });
+      const stream = createReadStream(archivePath);
+      stream.pipe(response);
+      stream.on("end", () => void cleanup());
+      return;
+    }
+
+    if (pathname === "/api/accounts/import" && request.method === "POST") {
+      try {
+        const imported = await this.deps.importArchive(request);
+        this.sendJson(response, 200, imported);
+      } catch (error) {
+        this.sendJson(response, 400, { error: { message: (error as Error).message } });
+      }
+      return;
+    }
+
+    if (pathname === "/api/usage" && request.method === "GET") {
+      const usage = this.deps.usage ? await this.deps.usage.aggregate() : { totalRequests: 0 };
+      this.sendJson(response, 200, usage);
       return;
     }
 

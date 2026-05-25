@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -37,6 +38,7 @@ import {
   type ParsedToolCall,
 } from "./tool-calls.js";
 import { checkApiKey, parseApiKeys } from "./auth/api-key.js";
+import { packAccount, unpackAccount } from "./auth/packager.js";
 import { ConsoleServer } from "./console/server.js";
 import { UsageTracker } from "./usage/tracker.js";
 
@@ -65,15 +67,7 @@ const CONSOLE_SESSION_TTL_HOURS = Number.parseInt(process.env.CONSOLE_SESSION_TT
 const RATE_LIMIT_MAX_ATTEMPTS = Number.parseInt(process.env.RATE_LIMIT_MAX_ATTEMPTS ?? "5", 10);
 const RATE_LIMIT_WINDOW_MINUTES = Number.parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES ?? "15", 10);
 
-const consoleServer = CONSOLE_PASSWORD
-  ? new ConsoleServer({
-      password: CONSOLE_PASSWORD,
-      username: CONSOLE_USERNAME,
-      sessionTtlMs: CONSOLE_SESSION_TTL_HOURS * 3600_000,
-      rateLimitMax: RATE_LIMIT_MAX_ATTEMPTS,
-      rateLimitWindowMs: RATE_LIMIT_WINDOW_MINUTES * 60_000,
-    })
-  : null;
+let consoleServer: ConsoleServer | null = null;
 interface OpenAIChatCompletionRequest {
   model?: string;
   messages?: Array<{ role?: string; content?: unknown }>;
@@ -121,6 +115,45 @@ export async function startApiServer(log: (message: string) => void = console.lo
   const backend = new AnythingProxyBackend(log);
   await backend.maybeRotateUsage();
   await backend.refreshPoolMetrics();
+
+  if (CONSOLE_PASSWORD) {
+    consoleServer = new ConsoleServer(
+      {
+        password: CONSOLE_PASSWORD,
+        username: CONSOLE_USERNAME,
+        sessionTtlMs: CONSOLE_SESSION_TTL_HOURS * 3600_000,
+        rateLimitMax: RATE_LIMIT_MAX_ATTEMPTS,
+        rateLimitWindowMs: RATE_LIMIT_WINDOW_MINUTES * 60_000,
+      },
+      {
+        pool: backend.pool,
+        usage: backend.usage,
+        importArchive: async (stream) => {
+          const tmpFile = path.join(os.tmpdir(), `import-${Date.now()}.tar.gz`);
+          await pipeStreamToFile(stream, tmpFile);
+          const dir = await unpackAccount(tmpFile);
+          const session = JSON.parse(
+            await readFile(path.join(dir, "session.json"), "utf8"),
+          ) as AccountSessionRecord;
+          await backend.pool.addPreparedSession(session);
+          await rm(tmpFile, { force: true });
+          return session;
+        },
+        exportAccount: async (accountId) => {
+          const accounts = await backend.pool.listAccounts();
+          const account = accounts.find((a) => a.accountId === accountId);
+          if (!account) throw new Error("not found");
+          const tmpDir = await mkdtemp(path.join(os.tmpdir(), "export-"));
+          const archive = path.join(tmpDir, `${accountId}.tar.gz`);
+          await packAccount(account.accountDir, archive);
+          return {
+            archivePath: archive,
+            cleanup: async () => rm(tmpDir, { recursive: true, force: true }),
+          };
+        },
+      },
+    );
+  }
   const server = createServer(async (request, response) => {
     const finishMetrics = backend.metrics.beginHttpRequest();
     setCorsHeaders(response);
@@ -153,11 +186,11 @@ export async function startApiServer(log: (message: string) => void = console.lo
 }
 
 class AnythingProxyBackend {
-  private readonly pool: AccountPool;
+  public readonly pool: AccountPool;
   private readonly browsers = new Map<string, BrowserSessionHandle>();
   private readonly busyAccountIds = new Set<string>();
   public readonly metrics = new MetricsRegistry();
-  private readonly usage: UsageTracker | null;
+  public readonly usage: UsageTracker | null;
 
   public constructor(private readonly log: (message: string) => void) {
     this.pool = new AccountPool(log);
@@ -1374,4 +1407,15 @@ async function streamAnthropicMessagesFake(
   }
   writeAnthropicStop(response, "end_turn");
   response.end();
+}
+
+async function pipeStreamToFile(input: NodeJS.ReadableStream, target: string): Promise<void> {
+  const { createWriteStream } = await import("node:fs");
+  await new Promise<void>((resolve, reject) => {
+    const ws = createWriteStream(target);
+    input.pipe(ws);
+    ws.on("finish", resolve);
+    ws.on("error", reject);
+    input.on("error", reject);
+  });
 }
