@@ -5,14 +5,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/cli.js serve",
-    "register": "node dist/src/cli.js register",
-    "login": "node dist/src/cli.js login",
-    "pool:fill": "node dist/src/cli.js pool-fill",
+    "serve": "node dist/src/cli.js serve",
     "pool:status": "node dist/src/cli.js pool-status",
     "discover-models": "node dist/src/discover-models.js",
-    "explore": "node dist/src/cli.js explore",
-    "serve": "node dist/src/cli.js serve",
-    "test": "npm run build && node --test dist/test/*.test.js dist/test/util/*.test.js"
+    "test": "npm run build && node --test dist/test/**/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

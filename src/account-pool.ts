@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { registerAndLogin, type AccountSessionRecord } from "./account.js";
+import type { AccountSessionRecord } from "./account.js";
 import { formatError } from "./util/error.js";
 import { formatLocalTimestamp } from "./util/time.js";
 
@@ -34,31 +34,15 @@ export interface AccountPoolSummary {
 const DATA_DIR = path.resolve(process.cwd(), process.env.DATA_DIR ?? "data");
 const POOL_STATE_PATH = path.join(DATA_DIR, "account-pool.json");
 const MAX_POOL_SIZE = parsePositiveInteger(process.env.MAX_POOL_SIZE, 1024);
-const DEFAULT_POOL_SIZE = clampPoolSize(parsePositiveInteger(process.env.POOL_SIZE, 3));
 const ACCOUNT_COOLDOWN_HOURS = parsePositiveInteger(process.env.ACCOUNT_COOLDOWN_HOURS, 12);
 const ACCOUNT_MAX_STRIKES = parsePositiveInteger(process.env.ACCOUNT_MAX_STRIKES, 2);
-const REFILL_FAILURE_DELAY_MS = parsePositiveInteger(process.env.REFILL_FAILURE_DELAY_MS, 1000);
 
 export class AccountPool {
   private queue: Promise<unknown> = Promise.resolve();
-  private bootstrapPromise: Promise<void> | null = null;
 
   public constructor(
     private readonly log: (message: string) => void = console.log,
-    private readonly dependencies: {
-      registerAndLogin?: typeof registerAndLogin;
-    } = {},
   ) {}
-
-  public async ensureReady(targetSize = DEFAULT_POOL_SIZE): Promise<void> {
-    await this.startBootstrap(targetSize);
-  }
-
-  public async warmInBackground(targetSize = DEFAULT_POOL_SIZE): Promise<void> {
-    void this.startBootstrap(targetSize).catch((error) => {
-      this.log(`[-] 账号池预热失败: ${formatError(error)}`);
-    });
-  }
 
   public async acquireAccount(excludedAccountIds: ReadonlySet<string> = new Set()): Promise<PoolAccountRecord> {
     return this.runExclusive(async () => {
@@ -70,30 +54,15 @@ export class AccountPool {
         .filter((account) => !excludedAccountIds.has(account.accountId))
         .sort(compareByLeastRecentlyUsed);
 
-      if (candidates.length > 0) {
-        const selected = candidates[0]!;
-        selected.lastUsedAt = formatLocalTimestamp(new Date());
-        state.updatedAt = formatLocalTimestamp(new Date());
-        await this.saveState(state);
-        return selected;
-      }
-
-      await this.ensureMinimumAccountsUnlocked(Math.max(state.desiredSize, DEFAULT_POOL_SIZE), state);
-      const refreshed = state;
-
-      const fallback = refreshed.accounts
-        .filter((account) => account.status === "active")
-        .filter((account) => !excludedAccountIds.has(account.accountId))
-        .sort(compareByLeastRecentlyUsed)[0];
-
-      if (!fallback) {
+      if (candidates.length === 0) {
         throw new Error("账号池中没有可用账号");
       }
 
-      fallback.lastUsedAt = formatLocalTimestamp(new Date());
-      refreshed.updatedAt = formatLocalTimestamp(new Date());
-      await this.saveState(refreshed);
-      return fallback;
+      const selected = candidates[0]!;
+      selected.lastUsedAt = formatLocalTimestamp(new Date());
+      state.updatedAt = formatLocalTimestamp(new Date());
+      await this.saveState(state);
+      return selected;
     });
   }
 
@@ -199,12 +168,6 @@ export class AccountPool {
     });
   }
 
-  public async ensureMinimumAccounts(targetSize = DEFAULT_POOL_SIZE): Promise<void> {
-    await this.runExclusive(async () => {
-      await this.ensureMinimumAccountsUnlocked(targetSize);
-    });
-  }
-
   private async loadState(): Promise<AccountPoolState> {
     try {
       const raw = await readFile(POOL_STATE_PATH, "utf8");
@@ -212,7 +175,7 @@ export class AccountPool {
     } catch {
       return {
         version: 1,
-        desiredSize: DEFAULT_POOL_SIZE,
+        desiredSize: 0,
         updatedAt: formatLocalTimestamp(new Date()),
         accounts: [],
       };
@@ -222,37 +185,6 @@ export class AccountPool {
   private async saveState(state: AccountPoolState): Promise<void> {
     await mkdir(DATA_DIR, { recursive: true });
     await writeFile(POOL_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-  }
-
-  private async ensureMinimumAccountsUnlocked(targetSize: number, state?: AccountPoolState): Promise<void> {
-    const currentState = state ?? (await this.loadState());
-    currentState.desiredSize = clampPoolSize(targetSize);
-    this.reactivateExpiredCooldowns(currentState);
-    compactState(currentState);
-
-    while (countUsableAccounts(currentState) < currentState.desiredSize) {
-      this.log(`[*] 账号池补货中: current=${countUsableAccounts(currentState)} target=${currentState.desiredSize}`);
-      try {
-        const created = await (this.dependencies.registerAndLogin ?? registerAndLogin)(this.log);
-        currentState.accounts.push({
-          ...created.session,
-          status: "active",
-          strikeCount: 0,
-          cooldownUntil: null,
-          lastError: null,
-          lastUsedAt: null,
-        });
-        currentState.updatedAt = formatLocalTimestamp(new Date());
-        await this.saveState(currentState);
-      } catch (error) {
-        this.log(`[-] 单个补货账号失败，继续下一个: ${formatError(error)}`);
-        await sleep(REFILL_FAILURE_DELAY_MS);
-      }
-    }
-
-    compactState(currentState);
-    currentState.updatedAt = formatLocalTimestamp(new Date());
-    await this.saveState(currentState);
   }
 
   private reactivateExpiredCooldowns(state: AccountPoolState): void {
@@ -277,24 +209,6 @@ export class AccountPool {
     this.queue = next.catch(() => undefined);
     return next;
   }
-
-  private async startBootstrap(targetSize: number): Promise<void> {
-    if (!this.bootstrapPromise) {
-      this.bootstrapPromise = this.runExclusive(async () => {
-        try {
-          await this.ensureMinimumAccountsUnlocked(targetSize);
-        } finally {
-          this.bootstrapPromise = null;
-        }
-      });
-    }
-
-    await this.bootstrapPromise;
-  }
-}
-
-function countUsableAccounts(state: AccountPoolState): number {
-  return state.accounts.filter((account) => account.status === "active").length;
 }
 
 function countNonDeletedAccounts(state: AccountPoolState): number {
@@ -314,10 +228,6 @@ function addHours(date: Date, hours: number): Date {
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function clampPoolSize(value: number): number {
-  return Math.min(Math.max(1, value), MAX_POOL_SIZE);
 }
 
 function compactState(state: AccountPoolState): void {
@@ -366,10 +276,4 @@ function summarizeState(state: AccountPoolState): AccountPoolSummary {
   }
 
   return counts;
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
 }
