@@ -84,8 +84,17 @@ export async function launchAndLoginWithMagicLink(options: LoginLaunchOptions): 
   }
 }
 
-export async function openBrowserSession(accountDir: string, fingerprint: StableFingerprint): Promise<BrowserSessionHandle> {
-  const browser = await launchBrowser({ accountDir, fingerprint });
+export async function openBrowserSession(
+  accountDir: string,
+  fingerprint: StableFingerprint,
+  options: { headless?: boolean; display?: string } = {},
+): Promise<BrowserSessionHandle> {
+  const browser = await launchBrowser({
+    accountDir,
+    fingerprint,
+    headless: options.headless,
+    display: options.display,
+  });
   return {
     browser,
     accountDir,
@@ -356,27 +365,128 @@ query GetLatestRevisionForProxy($projectGroupId: ID!) {
   }
 }
 
-async function launchBrowser(options: { accountDir: string; fingerprint: StableFingerprint }): Promise<Browser> {
+export interface InteractiveLoginResult {
+  finalUrl: string;
+  title: string;
+  userId: string;
+  email: string;
+  projectGroupId: string;
+}
+
+export async function runInteractiveLogin(options: {
+  handle: BrowserSessionHandle;
+  log?: (message: string) => void;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  signal?: AbortSignal;
+}): Promise<InteractiveLoginResult> {
+  const log = options.log ?? (() => {});
+  const timeoutMs = options.timeoutMs ?? 600_000;
+  const pollMs = options.pollIntervalMs ?? 2_000;
+  const deadline = Date.now() + timeoutMs;
+
+  const page = await options.handle.browser.newPage();
+  await preparePage(page, options.handle.fingerprint);
+  await page.goto(`${ANYTHING_BASE_URL}/login`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+
+  try {
+    while (Date.now() < deadline) {
+      if (options.signal?.aborted) throw new Error("登录已被取消");
+      await delay(pollMs);
+
+      const url = page.url();
+      if (!url.startsWith(ANYTHING_BASE_URL)) continue;
+      if (url.match(/\/(login|signup|auth)(\/|$|\?)/i)) continue;
+
+      const cookies = await page.cookies();
+      if (!cookies.find((c) => c.name === "lS_authToken" && c.value)) continue;
+
+      try {
+        const meResponse = await graphqlRequest(page, {
+          operationName: "Me",
+          variables: {},
+          extensions: { clientLibrary: { name: "@apollo/client", version: "4.1.6" } },
+          query: `query Me { me { id email displayName __typename } }`,
+        });
+        const me = (meResponse as { data?: { me?: { id?: string; email?: string } } }).data?.me;
+        if (!me?.id || !me.email) continue;
+
+        const groupResponse = await graphqlRequest(page, {
+          operationName: "GetProjectGroups",
+          variables: {
+            organizationId: null,
+            input: { organizationId: null, orderBy: { field: "UPDATED_AT", direction: "DESC" } },
+          },
+          extensions: { clientLibrary: { name: "@apollo/client", version: "4.1.6" } },
+          query: `query GetProjectGroups($organizationId: ID, $input: ProjectGroupsInput!) {
+            projectGroups(input: $input) { edges { node { id name __typename } __typename } __typename }
+          }`,
+        });
+        const edges =
+          (groupResponse as { data?: { projectGroups?: { edges?: Array<{ node?: { id?: string } }> } } })
+            .data?.projectGroups?.edges ?? [];
+        const projectGroupId = edges[0]?.node?.id;
+        if (!projectGroupId) {
+          log("[!] 当前账号还没有任何项目，请到 anything.com 主页新建一个项目后回到本页继续。");
+          continue;
+        }
+
+        return {
+          finalUrl: url,
+          title: await page.title(),
+          userId: me.id,
+          email: me.email,
+          projectGroupId,
+        };
+      } catch (error) {
+        log(`[!] 登录校验失败，继续等待: ${formatError(error)}`);
+      }
+    }
+
+    throw new Error("登录超时");
+  } finally {
+    await page.close().catch(() => undefined);
+  }
+}
+
+interface LaunchOptions {
+  accountDir: string;
+  fingerprint: StableFingerprint;
+  headless?: boolean;
+  display?: string;
+}
+
+async function launchBrowser(options: LaunchOptions): Promise<Browser> {
   await mkdir(path.join(options.accountDir, "user-data"), { recursive: true });
 
-  const headless: boolean | "shell" = HEADLESS_MODE === "false" ? false : true;
-  return puppeteerExtra.launch({
-    headless,
-    ignoreHTTPSErrors: true,
-    userDataDir: path.join(options.accountDir, "user-data"),
-    defaultViewport: null,
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-dev-shm-usage",
-      "--ignore-certificate-errors",
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-features=Translate,OptimizationHints,MediaRouter",
-      `--window-size=${options.fingerprint.viewport.width},${options.fingerprint.viewport.height}`,
-    ],
-  });
+  const headless = options.headless ?? (HEADLESS_MODE !== "false");
+
+  const prevDisplay = process.env.DISPLAY;
+  if (options.display) process.env.DISPLAY = options.display;
+  try {
+    return await puppeteerExtra.launch({
+      headless,
+      ignoreHTTPSErrors: true,
+      userDataDir: path.join(options.accountDir, "user-data"),
+      defaultViewport: null,
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-dev-shm-usage",
+        "--ignore-certificate-errors",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-features=Translate,OptimizationHints,MediaRouter",
+        `--window-size=${options.fingerprint.viewport.width},${options.fingerprint.viewport.height}`,
+      ],
+    });
+  } finally {
+    if (options.display) {
+      if (prevDisplay === undefined) delete process.env.DISPLAY;
+      else process.env.DISPLAY = prevDisplay;
+    }
+  }
 }
 
 async function preparePage(page: Page, fingerprint: StableFingerprint): Promise<void> {
