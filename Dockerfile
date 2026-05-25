@@ -1,3 +1,16 @@
+# ===== Build stage =====
+FROM node:20-bookworm-slim AS builder
+
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
+WORKDIR /app
+COPY package*.json tsconfig.json ./
+RUN npm ci
+COPY src ./src
+RUN npx tsc -p tsconfig.json \
+ && node -e "require('fs').cpSync('src/console/static','dist/src/console/static',{recursive:true})"
+
+# ===== Runtime stage =====
 FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,13 +33,7 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
-
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm install --no-save typescript@5 \
- && npx tsc -p tsconfig.json \
- && node -e "require('fs').cpSync('src/console/static','dist/src/console/static',{recursive:true})" \
- && rm -rf src node_modules/typescript
+COPY --from=builder /app/dist ./dist
 
 RUN useradd -m -s /bin/bash app \
  && mkdir -p /app/data \
