@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { closeBrowserSession, openBrowserSession, runInteractiveLogin } from "./browser.js";
+import type { BrowserEngine } from "./browser.js";
 import type { StableFingerprint } from "./fingerprint.js";
 import { loadOrCreateFingerprint } from "./fingerprint.js";
 import { formatError } from "./util/error.js";
@@ -20,6 +21,7 @@ export interface AccountSessionRecord {
   title: string;
   createdAt: string;
   fingerprint: StableFingerprint;
+  browserEngine?: BrowserEngine;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), process.env.DATA_DIR ?? "data");
@@ -57,6 +59,7 @@ export function summarizeSession(session: AccountSessionRecord): string {
       projectGroupId: session.projectGroupId,
       finalUrl: session.finalUrl,
       accountDir: session.accountDir,
+      browserEngine: session.browserEngine ?? "chromium",
     },
     null,
     2,
@@ -124,6 +127,7 @@ export async function loginInteractive(
       title: result.title,
       createdAt: formatLocalTimestamp(new Date()),
       fingerprint: finalFingerprint,
+      browserEngine: handle.engine,
     };
 
     await writeFile(path.join(targetDir, "session.json"), `${JSON.stringify(session, null, 2)}\n`, "utf8");

@@ -412,7 +412,9 @@ class AnythingProxyBackend {
       return existing;
     }
 
-    const browser = await openBrowserSession(account.accountDir, account.fingerprint);
+    const browser = await openBrowserSession(account.accountDir, account.fingerprint, {
+      browserEngine: account.browserEngine ?? "chromium",
+    });
     this.browsers.set(account.accountId, browser);
     this.refreshPoolMetrics();
     return browser;

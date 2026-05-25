@@ -1,9 +1,15 @@
-import { mkdir } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 
+import { firefox, type BrowserContext as PlaywrightBrowserContext, type Page as PlaywrightPage } from "playwright-core";
 import puppeteerExtraModule from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import type { Browser, Page } from "puppeteer";
+import type {
+  Browser as PuppeteerBrowser,
+  HTTPRequest as PuppeteerRequest,
+  HTTPResponse as PuppeteerResponse,
+  Page as PuppeteerPage,
+} from "puppeteer";
 
 import { resolveModel } from "./model-catalog.js";
 import type { StableFingerprint } from "./fingerprint.js";
@@ -11,12 +17,37 @@ import { formatError } from "./util/error.js";
 
 const puppeteerExtra = puppeteerExtraModule as unknown as {
   use(plugin: unknown): void;
-  launch(options: unknown): Promise<Browser>;
+  launch(options: unknown): Promise<PuppeteerBrowser>;
 };
 puppeteerExtra.use(StealthPlugin());
 
 const ANYTHING_BASE_URL = process.env.ANYTHING_BASE_URL ?? "https://www.anything.com";
 const HEADLESS_MODE = (process.env.HEADLESS ?? "true").toLowerCase();
+const DEFAULT_CAMOUFOX_PATH = "/app/camoufox-linux/camoufox";
+
+export type BrowserEngine = "chromium" | "firefox";
+type BrowserPage = PuppeteerPage | PlaywrightPage;
+type BrowserRequest = PuppeteerRequest | import("playwright-core").Request;
+type BrowserResponse = PuppeteerResponse | import("playwright-core").Response;
+type CommonElementHandle = {
+  click(options?: { clickCount?: number }): Promise<void>;
+  dispose(): Promise<void> | void;
+  evaluate<T>(pageFunction: Function): Promise<T>;
+};
+type CommonPage = {
+  on(event: "request", listener: (request: BrowserRequest) => void): void;
+  on(event: "response", listener: (response: BrowserResponse) => void): void;
+  $(selector: string): Promise<CommonElementHandle | null>;
+  waitForSelector(selector: string, options: Record<string, unknown>): Promise<CommonElementHandle | null>;
+  type(selector: string, text: string, options?: { delay?: number }): Promise<void>;
+  evaluate<T>(pageFunction: Function, arg?: unknown): Promise<T>;
+  focus(selector: string): Promise<void>;
+  keyboard: {
+    press(key: string): Promise<void>;
+    down(key: string): Promise<void>;
+    up(key: string): Promise<void>;
+  };
+};
 
 export interface LoginLaunchOptions {
   accountDir: string;
@@ -43,11 +74,19 @@ export interface PromptRunResult {
   domSnapshot: string;
 }
 
-export interface BrowserSessionHandle {
-  browser: Browser;
-  accountDir: string;
-  fingerprint: StableFingerprint;
-}
+export type BrowserSessionHandle =
+  | {
+      engine: "chromium";
+      browser: PuppeteerBrowser;
+      accountDir: string;
+      fingerprint: StableFingerprint;
+    }
+  | {
+      engine: "firefox";
+      context: PlaywrightBrowserContext;
+      accountDir: string;
+      fingerprint: StableFingerprint;
+    };
 
 export interface GraphqlGenerationResult {
   revisionId: string;
@@ -56,14 +95,10 @@ export interface GraphqlGenerationResult {
 }
 
 export async function launchAndLoginWithMagicLink(options: LoginLaunchOptions): Promise<{ finalUrl: string; title: string }> {
-  const browser = await launchBrowser({
-    accountDir: options.accountDir,
-    fingerprint: options.fingerprint,
-  });
+  const handle = await openBrowserSession(options.accountDir, options.fingerprint);
 
   try {
-    const page = await browser.newPage();
-    await preparePage(page, options.fingerprint);
+    const page = await openSessionPage(handle);
     await page.goto(normalizeMagicLinkForBrowser(options.magicLink), {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
@@ -80,22 +115,39 @@ export async function launchAndLoginWithMagicLink(options: LoginLaunchOptions): 
       title,
     };
   } finally {
-    await browser.close().catch(() => undefined);
+    await closeBrowserSession(handle);
   }
 }
 
 export async function openBrowserSession(
   accountDir: string,
   fingerprint: StableFingerprint,
-  options: { headless?: boolean; display?: string } = {},
+  options: { headless?: boolean; display?: string; browserEngine?: BrowserEngine } = {},
 ): Promise<BrowserSessionHandle> {
-  const browser = await launchBrowser({
+  const engine = resolveBrowserEngine(options.browserEngine);
+  if (engine === "firefox") {
+    const context = await launchFirefoxContext({
+      accountDir,
+      fingerprint,
+      headless: options.headless,
+      display: options.display,
+    });
+    return {
+      engine,
+      context,
+      accountDir,
+      fingerprint,
+    };
+  }
+
+  const browser = await launchChromiumBrowser({
     accountDir,
     fingerprint,
     headless: options.headless,
     display: options.display,
   });
   return {
+    engine,
     browser,
     accountDir,
     fingerprint,
@@ -103,6 +155,11 @@ export async function openBrowserSession(
 }
 
 export async function closeBrowserSession(handle: BrowserSessionHandle): Promise<void> {
+  if (handle.engine === "firefox") {
+    await handle.context.close().catch(() => undefined);
+    return;
+  }
+
   await handle.browser.close().catch(() => undefined);
 }
 
@@ -112,15 +169,15 @@ export async function runPromptInBrowser(
   prompt: string,
   log: (message: string) => void = console.log,
 ): Promise<PromptRunResult> {
-  const page = await handle.browser.newPage();
-  await preparePage(page, handle.fingerprint);
+  const page = await openSessionPage(handle);
 
   const capturedRequests: PromptRunResult["requests"] = [];
   const capturedResponses: PromptRunResult["responses"] = [];
   const promptSnippet = prompt.slice(0, 120);
   const trackedRequests = new WeakSet<object>();
+  const commonPage = asCommonPage(page);
 
-  page.on("request", (request) => {
+  commonPage.on("request", (request: BrowserRequest) => {
     const postData = request.postData() ?? undefined;
     const isInteresting =
       request.resourceType() === "fetch" ||
@@ -142,7 +199,7 @@ export async function runPromptInBrowser(
     }
   });
 
-  page.on("response", async (response) => {
+  commonPage.on("response", async (response: BrowserResponse) => {
     const request = response.request();
     const contentType = response.headers()["content-type"] ?? "";
     const maybeInteresting =
@@ -217,8 +274,7 @@ export async function generateProjectGroupRevisionViaGraphql(options: {
   log?: (message: string) => void;
   onUpdate?: (rawText: string, status: string) => Promise<void> | void;
 }): Promise<GraphqlGenerationResult> {
-  const page = await options.handle.browser.newPage();
-  await preparePage(page, options.handle.fingerprint);
+  const page = await openSessionPage(options.handle);
   const resolvedModel = resolveModel(options.preferredModel);
 
   try {
@@ -385,8 +441,7 @@ export async function runInteractiveLogin(options: {
   const pollMs = options.pollIntervalMs ?? 2_000;
   const deadline = Date.now() + timeoutMs;
 
-  const page = await options.handle.browser.newPage();
-  await preparePage(page, options.handle.fingerprint);
+  const page = await openSessionPage(options.handle);
   await page.goto(`${ANYTHING_BASE_URL}/login`, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
   try {
@@ -395,10 +450,10 @@ export async function runInteractiveLogin(options: {
       await delay(pollMs);
 
       const url = page.url();
-      if (!url.startsWith(ANYTHING_BASE_URL)) continue;
+      if (!isAnythingPageUrl(url)) continue;
       if (url.match(/\/(login|signup|auth)(\/|$|\?)/i)) continue;
 
-      const cookies = await page.cookies();
+      const cookies = await getSessionCookies(options.handle, page);
       if (!cookies.find((c) => c.name === "lS_authToken" && c.value)) continue;
 
       try {
@@ -456,7 +511,113 @@ interface LaunchOptions {
   display?: string;
 }
 
-async function launchBrowser(options: LaunchOptions): Promise<Browser> {
+export function resolveBrowserEngine(preferred?: BrowserEngine): BrowserEngine {
+  if (preferred) {
+    return preferred;
+  }
+
+  const configured = (process.env.BROWSER_ENGINE ?? "").trim().toLowerCase();
+  if (configured === "firefox" || configured === "camoufox") {
+    return "firefox";
+  }
+  if (configured === "chromium" || configured === "chrome" || configured === "puppeteer") {
+    return "chromium";
+  }
+  if (process.env.CAMOUFOX_EXECUTABLE_PATH?.trim() || process.env.PLAYWRIGHT_FIREFOX_EXECUTABLE_PATH?.trim()) {
+    return "firefox";
+  }
+
+  return "chromium";
+}
+
+async function openSessionPage(handle: BrowserSessionHandle): Promise<BrowserPage> {
+  const page = handle.engine === "firefox"
+    ? await handle.context.newPage()
+    : await handle.browser.newPage();
+  await preparePage(page, handle);
+  return page;
+}
+
+function asCommonPage(page: BrowserPage): CommonPage {
+  return page as unknown as CommonPage;
+}
+
+async function getSessionCookies(
+  handle: BrowserSessionHandle,
+  page: BrowserPage,
+): Promise<Array<{ name: string; value: string }>> {
+  if (handle.engine === "firefox") {
+    return await handle.context.cookies();
+  }
+
+  return await (page as PuppeteerPage).cookies();
+}
+
+async function launchFirefoxContext(options: LaunchOptions): Promise<PlaywrightBrowserContext> {
+  const userDataDir = path.join(options.accountDir, "user-data");
+  await mkdir(userDataDir, { recursive: true });
+
+  const headless = options.headless ?? (HEADLESS_MODE !== "false");
+  const executablePath = await resolveFirefoxExecutablePath();
+  if (!executablePath) {
+    throw new Error(
+      "未找到 Firefox/Camoufox 可执行文件。请设置 CAMOUFOX_EXECUTABLE_PATH 或 PLAYWRIGHT_FIREFOX_EXECUTABLE_PATH。",
+    );
+  }
+
+  const context = await firefox.launchPersistentContext(userDataDir, {
+    executablePath,
+    headless,
+    viewport: options.fingerprint.viewport,
+    userAgent: options.fingerprint.userAgent,
+    locale: options.fingerprint.locale,
+    colorScheme: options.fingerprint.colorScheme,
+    extraHTTPHeaders: {
+      "accept-language": options.fingerprint.acceptLanguage,
+    },
+    ignoreHTTPSErrors: true,
+    env: {
+      ...process.env,
+      ...(options.display ? { DISPLAY: options.display } : {}),
+    },
+    firefoxUserPrefs: {
+      "dom.webdriver.enabled": false,
+      "intl.accept_languages": options.fingerprint.acceptLanguage,
+      "privacy.resistFingerprinting": false,
+    },
+  });
+  await context.addInitScript(applyFingerprint, options.fingerprint);
+  return context;
+}
+
+async function resolveFirefoxExecutablePath(): Promise<string | undefined> {
+  const candidates = [
+    process.env.CAMOUFOX_EXECUTABLE_PATH,
+    process.env.PLAYWRIGHT_FIREFOX_EXECUTABLE_PATH,
+    DEFAULT_CAMOUFOX_PATH,
+    "/usr/bin/firefox",
+    "/usr/bin/firefox-esr",
+  ].filter((item): item is string => Boolean(item?.trim()));
+
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+async function pathExists(candidate: string): Promise<boolean> {
+  try {
+    await access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function launchChromiumBrowser(options: LaunchOptions): Promise<PuppeteerBrowser> {
   await mkdir(path.join(options.accountDir, "user-data"), { recursive: true });
 
   const headless = options.headless ?? (HEADLESS_MODE !== "false");
@@ -491,17 +652,27 @@ async function launchBrowser(options: LaunchOptions): Promise<Browser> {
   }
 }
 
-async function preparePage(page: Page, fingerprint: StableFingerprint): Promise<void> {
-  await page.setUserAgent(fingerprint.userAgent);
-  await page.setViewport(fingerprint.viewport);
-  await page.setExtraHTTPHeaders({
-    "accept-language": fingerprint.acceptLanguage,
+async function preparePage(page: BrowserPage, handle: BrowserSessionHandle): Promise<void> {
+  if (handle.engine === "firefox") {
+    await (page as PlaywrightPage).setViewportSize(handle.fingerprint.viewport);
+    await (page as PlaywrightPage).emulateMedia({ colorScheme: handle.fingerprint.colorScheme });
+    await (page as PlaywrightPage).setExtraHTTPHeaders({
+      "accept-language": handle.fingerprint.acceptLanguage,
+    });
+    return;
+  }
+
+  const pageHandle = page as PuppeteerPage;
+  await pageHandle.setUserAgent(handle.fingerprint.userAgent);
+  await pageHandle.setViewport(handle.fingerprint.viewport);
+  await pageHandle.setExtraHTTPHeaders({
+    "accept-language": handle.fingerprint.acceptLanguage,
   });
-  await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: fingerprint.colorScheme }]);
-  await page.evaluateOnNewDocument(applyFingerprint, fingerprint);
+  await pageHandle.emulateMediaFeatures([{ name: "prefers-color-scheme", value: handle.fingerprint.colorScheme }]);
+  await pageHandle.evaluateOnNewDocument(applyFingerprint, handle.fingerprint);
 }
 
-async function waitForNonTrackingUrl(page: Page, timeoutMs: number): Promise<void> {
+async function waitForNonTrackingUrl(page: BrowserPage, timeoutMs: number): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const url = page.url();
@@ -513,14 +684,36 @@ async function waitForNonTrackingUrl(page: Page, timeoutMs: number): Promise<voi
   throw new Error("Magic Link 打开后长时间停留在跟踪跳转页");
 }
 
-async function waitForSettledPage(page: Page): Promise<void> {
+async function waitForSettledPage(page: BrowserPage): Promise<void> {
+  const waitForIdle = isPlaywrightPage(page)
+    ? page.waitForLoadState("networkidle", { timeout: 10_000 })
+    : page.waitForNetworkIdle({ idleTime: 1_000, timeout: 10_000 });
   await Promise.all([
-    page.waitForNetworkIdle({ idleTime: 1_000, timeout: 10_000 }).catch(() => undefined),
+    waitForIdle.catch(() => undefined),
     delay(2_000),
   ]);
 }
 
-async function locatePromptInput(page: Page): Promise<string | null> {
+function isPlaywrightPage(page: BrowserPage): page is PlaywrightPage {
+  return typeof (page as PlaywrightPage).waitForLoadState === "function";
+}
+
+async function waitForVisibleSelector(page: BrowserPage, selector: string): Promise<CommonElementHandle | null> {
+  if (isPlaywrightPage(page)) {
+    return await asCommonPage(page).waitForSelector(selector, {
+      timeout: 20_000,
+      state: "visible",
+    });
+  }
+
+  return await asCommonPage(page).waitForSelector(selector, {
+    timeout: 20_000,
+    visible: true,
+  });
+}
+
+async function locatePromptInput(page: BrowserPage): Promise<string | null> {
+  const commonPage = asCommonPage(page);
   const selectors = [
     "textarea",
     "[contenteditable='true'][role='textbox']",
@@ -528,7 +721,7 @@ async function locatePromptInput(page: Page): Promise<string | null> {
   ];
 
   for (const selector of selectors) {
-    const handle = await page.$(selector);
+    const handle = await commonPage.$(selector);
     if (handle) {
       await handle.dispose();
       return selector;
@@ -538,26 +731,25 @@ async function locatePromptInput(page: Page): Promise<string | null> {
   return null;
 }
 
-async function fillPrompt(page: Page, selector: string, prompt: string): Promise<void> {
-  const element = await page.waitForSelector(selector, {
-    timeout: 20_000,
-    visible: true,
-  });
+async function fillPrompt(page: BrowserPage, selector: string, prompt: string): Promise<void> {
+  const element = await waitForVisibleSelector(page, selector);
+  const commonPage = asCommonPage(page);
 
   if (!element) {
     throw new Error(`未找到输入框: ${selector}`);
   }
 
   await element.click({ clickCount: 3 });
-  await page.keyboard.press("Backspace");
+  await commonPage.keyboard.press("Backspace");
 
   if (selector === "textarea") {
-    await page.type(selector, prompt, { delay: 10 });
+    await commonPage.type(selector, prompt, { delay: 10 });
     return;
   }
 
-  await page.evaluate(
-    ({ value, currentSelector }) => {
+  await commonPage.evaluate(
+    (arg: unknown) => {
+      const { value, currentSelector } = arg as { value: string; currentSelector: string };
       const node = document.querySelector(currentSelector);
       if (!node) {
         return;
@@ -570,7 +762,8 @@ async function fillPrompt(page: Page, selector: string, prompt: string): Promise
   );
 }
 
-async function submitPrompt(page: Page, selector: string): Promise<void> {
+async function submitPrompt(page: BrowserPage, selector: string): Promise<void> {
+  const commonPage = asCommonPage(page);
   const submitSelectors = [
     "button[type='submit']",
     "form button",
@@ -579,12 +772,12 @@ async function submitPrompt(page: Page, selector: string): Promise<void> {
   ];
 
   for (const submitSelector of submitSelectors) {
-    const button = await page.$(submitSelector);
+    const button = await commonPage.$(submitSelector);
     if (!button) {
       continue;
     }
 
-    const disabled = await button.evaluate((node) => {
+    const disabled = await button.evaluate((node: Element) => {
       const element = node as HTMLButtonElement;
       return element.disabled || element.getAttribute("aria-disabled") === "true";
     });
@@ -599,15 +792,15 @@ async function submitPrompt(page: Page, selector: string): Promise<void> {
     return;
   }
 
-  await page.focus(selector);
+  await commonPage.focus(selector);
   const modifier = process.platform === "darwin" ? "Meta" : "Control";
-  await page.keyboard.down(modifier);
-  await page.keyboard.press("Enter");
-  await page.keyboard.up(modifier);
+  await commonPage.keyboard.down(modifier);
+  await commonPage.keyboard.press("Enter");
+  await commonPage.keyboard.up(modifier);
 }
 
-async function snapshotText(page: Page): Promise<string> {
-  const bodyText = await page.evaluate(() => document.body?.innerText ?? "");
+async function snapshotText(page: BrowserPage): Promise<string> {
+  const bodyText = await asCommonPage(page).evaluate<string>(() => document.body?.innerText ?? "");
   return truncate(bodyText.replace(/\n{3,}/g, "\n\n").trim(), 4_000) ?? "";
 }
 
@@ -631,10 +824,14 @@ function extractBestText(responses: PromptRunResult["responses"]): string | null
 }
 
 async function graphqlRequest(
-  page: Page,
+  page: BrowserPage,
   payload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const probe = await page.evaluate(async (requestPayload) => {
+  const probe = await asCommonPage(page).evaluate<{
+    status: number;
+    retryAfter: string | null;
+    text: string;
+  }>(async (requestPayload: unknown) => {
     const response = await fetch("/api/graphql", {
       method: "POST",
       credentials: "include",
@@ -781,6 +978,16 @@ function normalizeMagicLinkForBrowser(magicLink: string): string {
   }
 
   return magicLink.replace(/^http:\/\//i, "https://");
+}
+
+function isAnythingPageUrl(value: string): boolean {
+  try {
+    const currentHost = new URL(value).hostname.replace(/^www\./i, "");
+    const expectedHost = new URL(ANYTHING_BASE_URL).hostname.replace(/^www\./i, "");
+    return currentHost === expectedHost;
+  } catch {
+    return false;
+  }
 }
 
 function applyFingerprint(fingerprint: StableFingerprint): void {

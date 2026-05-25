@@ -40,7 +40,7 @@ curl -X POST http://127.0.0.1:7860/v1/chat/completions \
 ```bash
 npm install
 npm run build
-HEADLESS=false API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run login   # 弹出 Chromium 让你登录
+HEADLESS=false API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run login   # 弹出浏览器让你登录
 API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run serve
 ```
 
@@ -50,7 +50,7 @@ API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run serve
 
 ## API 鉴权
 
-`/v1/*` 必须带 `Authorization: Bearer <key>` 或 `x-api-key: <key>`，key 与 `API_KEYS` 环境变量逗号分隔列表匹配即可。未设 `API_KEYS` 启动直接退出。
+`/v1/*` 必须带 `Authorization: Bearer <key>` 或 `x-api-key: <key>`，key 与 `API_KEYS` 环境变量逗号分隔列表匹配即可。未设 `API_KEYS` 时管理控制台仍会启动，API 路由返回 503。
 
 ## 环境变量参考
 
@@ -64,7 +64,10 @@ API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run serve
 | `CONSOLE_SESSION_TTL_HOURS` | `24` | 控制台 cookie 有效期 |
 | `RATE_LIMIT_MAX_ATTEMPTS` | `5` | 控制台登录失败次数 |
 | `RATE_LIMIT_WINDOW_MINUTES` | `15` | 失败窗口 |
-| `HEADLESS` | `true` | 服务运行时 puppeteer 模式 |
+| `HEADLESS` | `true` | 服务运行时浏览器是否无头 |
+| `BROWSER_ENGINE` | Docker 为 `firefox`，本地未设则 `chromium` | `firefox`/`camoufox` 或 `chromium` |
+| `CAMOUFOX_EXECUTABLE_PATH` | Docker 内 `/app/camoufox-linux/camoufox` | Camoufox 可执行文件路径 |
+| `PLAYWRIGHT_FIREFOX_EXECUTABLE_PATH` | 可选 | 自定义 Firefox 可执行文件路径 |
 | `DATA_DIR` | `data` | 数据目录 |
 | `MAX_POOL_SIZE` | `32` | 账号上限 |
 | `ACCOUNT_COOLDOWN_HOURS` | `12` | cooldown 时长 |
@@ -81,7 +84,7 @@ API_KEYS=dev WEB_CONSOLE_PASSWORD=dev npm run serve
 | `USAGE_MAX_BYTES` | `52428800` | usage-stats rotate 阈值（50MB） |
 | `ANYTHING_BASE_URL` | `https://www.anything.com` | 上游 |
 | `TZ` | 系统时区 | |
-| `NOVNC_DIR` | `/usr/share/novnc` | noVNC 静态资源路径 |
+| `NOVNC_DIR` | `/usr/share/novnc` | 可选的系统 noVNC 资源 fallback；默认优先使用内置资源 |
 
 ## 部署方案矩阵
 

@@ -55,7 +55,7 @@ export class VncSupervisor {
 
       const websockify = spawnImpl(
         "websockify",
-        [String(wsPort), `127.0.0.1:${vncPort}`, "--web", process.env.NOVNC_DIR ?? "/usr/share/novnc"],
+        [String(wsPort), `127.0.0.1:${vncPort}`],
         { stdio: "ignore" },
       );
       processes.push(websockify);
