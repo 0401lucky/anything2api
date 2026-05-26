@@ -58,7 +58,22 @@ function parseCookieText(value: string): unknown {
   try {
     return JSON.parse(trimmed);
   } catch {
-    return parseCookieHeaderLikeText(trimmed);
+    const cookies = parseCookieHeaderLikeText(trimmed);
+    if (cookies.length > 0) {
+      return cookies;
+    }
+
+    const compactValue = trimmed.replace(/\s+/g, "");
+    if (looksLikeJwt(compactValue)) {
+      return [{
+        name: "refresh_token",
+        value: compactValue,
+        domain: ".anything.com",
+        path: "/",
+      }];
+    }
+
+    return cookies;
   }
 }
 
@@ -205,6 +220,10 @@ function isLikelyAuthCookie(cookie: StoredCookie): boolean {
     lowerName.includes("auth-token") ||
     lowerName.includes("auth_token")
   );
+}
+
+function looksLikeJwt(value: string): boolean {
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
 }
 
 function asString(value: unknown): string {

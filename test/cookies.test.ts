@@ -37,6 +37,20 @@ test("normalizeImportedCookies accepts refresh_token", () => {
   assert.equal(buildCookieHeader(cookies), "foo=bar; refresh_token=token");
 });
 
+test("normalizeImportedCookies treats bare JWT as refresh_token", () => {
+  const token = [
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+    "eyJzdWIiOiIxMjMiLCJleHAiOjE5OTk5OTk5OTl9",
+    "signature_part",
+  ].join(".");
+  const cookies = normalizeImportedCookies(` ${token.slice(0, 30)}\n${token.slice(30)} `);
+
+  assert.equal(cookies.length, 1);
+  assert.equal(cookies[0]?.name, "refresh_token");
+  assert.equal(cookies[0]?.value, token);
+  assert.equal(buildCookieHeader(cookies), `refresh_token=${token}`);
+});
+
 test("findCookieValue returns the exact cookie value", () => {
   const cookies = normalizeImportedCookies("refresh_token=refresh; lS_authToken=auth");
   assert.equal(findCookieValue(cookies, "lS_authToken"), "auth");
